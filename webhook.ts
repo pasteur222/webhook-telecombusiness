@@ -214,12 +214,16 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
     if (!baseUrl) {
       console.warn('BOLT_WEBHOOK_ENDPOINT not set, skipping status update forwarding');
       return;
+      return;
     }
     
     // Construct the endpoint URL for status updates
-    // Ensure we don't have double slashes in the URL
     const endpoint = baseUrl ? new URL('/api/whatsapp/status', baseUrl).toString() : null;
     
+    if (!endpoint) {
+      console.warn('No endpoint available for status updates, skipping');
+      return;
+    }
     if (!endpoint) {
       console.warn('No endpoint available for status updates, skipping');
       return;
@@ -258,14 +262,20 @@ async function forwardMessage(
     const baseUrl = process.env.BOLT_WEBHOOK_ENDPOINT;
     
     if (!baseUrl) {
-      console.warn('BOLT_WEBHOOK_ENDPOINT not set, skipping message forwarding');
+      console.warn('BOLT_WEBHOOK_ENDPOINT not set, sending auto-response instead');
+      await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
+      return;
       return;
     }
     
     // Construct the endpoint URL
-    // Ensure we don't have double slashes in the URL
     const endpoint = baseUrl ? new URL(`/api/chatbot/${chatbotType}`, baseUrl).toString() : null;
     
+    if (!endpoint) {
+      console.warn(`No endpoint available for ${chatbotType} chatbot, sending auto-response instead`);
+      await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
+      return;
+    }
     if (!endpoint) {
       console.warn(`No endpoint available for ${chatbotType} chatbot, skipping message forwarding`);
       return;
@@ -284,20 +294,97 @@ async function forwardMessage(
         recipient_type: 'individual',
         to: messageData.from,
         type: 'text',
-        text: { 
-          body: `Nous avons bien reçu votre message: "${messageData.text}". Notre équipe vous répondra bientôt.` 
+      }
+      )
+    }
+    )
+    try {
+      const response = await axios.post(endpoint, messageData, {
+        headers: {
+          'Content-Type': 'application/json'
         }
-      })
-    });
+      });
+      
+      console.log(`Message forwarded successfully: ${response.status}`);
+    } catch (error) {
+      console.error(`Error forwarding message to ${endpoint}:`, error);
+      console.log('Sending auto-response instead');
+      await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
+    }
+  } catch (error) {
+    console.error(`Error in forwardMessage:`, error);
+    // Try to send auto-response as fallback
+    try {
+      if (messageData && messageData.phoneNumberId && messageData.from) {
+        await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text || '', 'client');
+      }
+    } catch (autoResponseError) {
+      console.error('Failed to send auto-response:', autoResponseError);
+    }
+  }
+}
+
+/**
+ * Send an automatic response when forwarding fails
+ * @param phoneNumberId The phone number ID to use for sending
+ * @param to The recipient's phone number
+ * @param originalMessage The original message received
+ * @param chatbotType The type of chatbot that would have handled the message
+ */
+async function sendAutoResponse(
+  phoneNumberId: string,
+  to: string,
+  originalMessage: string,
+  chatbotType: 'client' | 'education' | 'quiz'
+): Promise<void> {
+  try {
+    // Get access token from environment variables
+    const accessToken = process.env.META_ACCESS_TOKEN;
+    
+    if (!accessToken) {
+      console.error('META_ACCESS_TOKEN environment variable is not set');
+      return;
+    }
+    
+    // Prepare response message based on chatbot type
+    let responseMessage = '';
+    
+    switch (chatbotType) {
+      case 'education':
+        responseMessage = 'Merci pour votre message concernant l\'éducation. Notre service est actuellement en maintenance. Nous vous répondrons dès que possible.';
+        break;
+      case 'quiz':
+        responseMessage = 'Merci pour votre intérêt pour nos quiz. Notre service est actuellement en maintenance. Nous vous répondrons dès que possible.';
+        break;
+      default:
+        responseMessage = 'Merci pour votre message. Notre service est actuellement en maintenance. Nous vous répondrons dès que possible.';
+    }
     
     if (!response.ok) {
       throw new Error(`Failed to send WhatsApp response: ${response.status} ${response.statusText}`);
     }
     
+    // Send response via WhatsApp API
+    const response = await axios.post(
+      `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: to,
+        type: 'text',
+        text: { body: responseMessage }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
     console.log(`Auto-response sent successfully: ${response.status}`);
   } catch (error) {
-    console.error(`Error sending auto-response for ${chatbotType} message:`, error);
-    throw error;
+    console.error(`Error sending auto-response:`, error);
   }
 }
 
@@ -333,13 +420,24 @@ app.get('/templates/:businessAccountId', async (req: Request, res: Response) => 
     console.error('Error fetching templates:', error);
     
     if (axios.isAxiosError(error)) {
-      return res.status(error.response?.status || 500).json({
-        error: (error as import('axios').AxiosError).response?.data || 'Error fetching templates'
-      });
+      const status = error.response?.status || 500;
+      const errorData = error.response?.data || 'Error fetching templates';
+      return res.status(status).json({ error: errorData });
     }
     
     res.status(500).json({ error: 'Error fetching templates' });
   }
+});
+
+/**
+ * Health check endpoint
+ */
+app.get('/', (req: Request, res: Response) => {
+  res.status(200).json({
+    status: 'ok',
+    message: 'WhatsApp webhook server is running',
+    version: '1.0.0'
+  });
 });
 
 // Start the server
