@@ -214,16 +214,11 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
     if (!baseUrl) {
       console.warn('BOLT_WEBHOOK_ENDPOINT not set, skipping status update forwarding');
       return;
-      return;
     }
     
     // Construct the endpoint URL for status updates
     const endpoint = baseUrl ? new URL('/api/whatsapp/status', baseUrl).toString() : null;
     
-    if (!endpoint) {
-      console.warn('No endpoint available for status updates, skipping');
-      return;
-    }
     if (!endpoint) {
       console.warn('No endpoint available for status updates, skipping');
       return;
@@ -265,7 +260,6 @@ async function forwardMessage(
       console.warn('BOLT_WEBHOOK_ENDPOINT not set, sending auto-response instead');
       await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
       return;
-      return;
     }
     
     // Construct the endpoint URL
@@ -274,10 +268,6 @@ async function forwardMessage(
     if (!endpoint) {
       console.warn(`No endpoint available for ${chatbotType} chatbot, sending auto-response instead`);
       await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
-      return;
-    }
-    if (!endpoint) {
-      console.warn(`No endpoint available for ${chatbotType} chatbot, skipping message forwarding`);
       return;
     }
     
@@ -289,38 +279,13 @@ async function forwardMessage(
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${process.env.META_ACCESS_TOKEN || ''}`
       }
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: messageData.from,
-        type: 'text',
-      }
-      )
-    }
-    )
-    try {
-      const response = await axios.post(endpoint, messageData, {
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      console.log(`Message forwarded successfully: ${response.status}`);
-    } catch (error) {
-      console.error(`Error forwarding message to ${endpoint}:`, error);
-      console.log('Sending auto-response instead');
-      await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
-    }
+    });
+    
+    console.log(`Message forwarded successfully: ${response.status}`);
   } catch (error) {
-    console.error(`Error in forwardMessage:`, error);
-    // Try to send auto-response as fallback
-    try {
-      if (messageData && messageData.phoneNumberId && messageData.from) {
-        await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text || '', 'client');
-      }
-    } catch (autoResponseError) {
-      console.error('Failed to send auto-response:', autoResponseError);
-    }
+    console.error(`Error forwarding message:`, error);
+    console.log('Sending auto-response instead');
+    await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
   }
 }
 
@@ -358,10 +323,6 @@ async function sendAutoResponse(
         break;
       default:
         responseMessage = 'Merci pour votre message. Notre service est actuellement en maintenance. Nous vous répondrons dès que possible.';
-    }
-    
-    if (!response.ok) {
-      throw new Error(`Failed to send WhatsApp response: ${response.status} ${response.statusText}`);
     }
     
     // Send response via WhatsApp API
