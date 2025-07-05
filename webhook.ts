@@ -10,8 +10,29 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
 
+// CORS headers
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
 // Middleware
 app.use(bodyParser.json());
+
+// Add CORS middleware
+app.use((req, res, next) => {
+  Object.keys(corsHeaders).forEach(key => {
+    res.setHeader(key, corsHeaders[key as keyof typeof corsHeaders]);
+  });
+  
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+    return;
+  }
+  
+  next();
+});
 
 /**
  * Trigger keywords for different chatbot types
@@ -77,9 +98,9 @@ app.get('/webhook', (req: Request, res: Response) => {
       res.sendStatus(403);
     }
   } else {
-    // Missing required parameters
-    console.error('Missing parameters for webhook verification');
-    res.sendStatus(400);
+    // Missing required parameters - return success for health checks
+    console.log('Webhook health check');
+    res.status(200).json({ status: 'ok', message: 'Webhook is running' });
   }
 });
 
@@ -195,7 +216,10 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
     }
     
     // Construct the endpoint URL for status updates
-    const endpoint = `${baseUrl}/api/whatsapp/status`;
+    // Ensure we don't have double slashes in the URL
+    const endpoint = new URL('/api/whatsapp/status', baseUrl).toString();
+    const endpoint = new URL('/api/whatsapp/status', baseUrl).toString();
+    const endpoint = new URL('/api/whatsapp/status', baseUrl).toString();
     
     // Send the status update
     await axios.post(endpoint, {
@@ -234,7 +258,10 @@ async function forwardMessage(
     }
     
     // Construct the endpoint URL
-    const endpoint = `${baseUrl}/api/chatbot/${chatbotType}`;
+    // Ensure we don't have double slashes in the URL
+    const endpoint = new URL(`/api/chatbot/${chatbotType}`, baseUrl).toString();
+    const endpoint = new URL(`/api/chatbot/${chatbotType}`, baseUrl).toString();
+    const endpoint = new URL(`/api/chatbot/${chatbotType}`, baseUrl).toString();
     
     console.log(`Forwarding message to ${endpoint}`);
     
@@ -285,7 +312,7 @@ app.get('/templates/:businessAccountId', async (req: Request, res: Response) => 
     
     if (axios.isAxiosError(error)) {
       return res.status(error.response?.status || 500).json({
-        error: error.response?.data || 'Error fetching templates'
+        error: (error as import('axios').AxiosError).response?.data || 'Error fetching templates'
       });
     }
     
