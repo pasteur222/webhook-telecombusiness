@@ -212,7 +212,15 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
     const baseUrl = process.env.BOLT_WEBHOOK_ENDPOINT;
     
     if (!baseUrl) {
-      console.warn('BOLT_WEBHOOK_ENDPOINT not set, skipping status update forwarding');
+      console.warn('BOLT_WEBHOOK_ENDPOINT not set or empty, skipping status update forwarding');
+      return;
+    }
+    
+    // Check if the URL is a local development URL
+    if (baseUrl.includes('local-credentialless.webcontainer-api.io') || 
+        baseUrl.includes('localhost') || 
+        baseUrl.includes('127.0.0.1')) {
+      console.warn('Local development URL detected in production environment, skipping status update forwarding');
       return;
     }
     
@@ -257,7 +265,16 @@ async function forwardMessage(
     const baseUrl = process.env.BOLT_WEBHOOK_ENDPOINT;
     
     if (!baseUrl) {
-      console.warn('BOLT_WEBHOOK_ENDPOINT not set, sending auto-response instead');
+      console.warn('BOLT_WEBHOOK_ENDPOINT not set or empty, sending auto-response instead');
+      await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
+      return;
+    }
+    
+    // Check if the URL is a local development URL
+    if (baseUrl.includes('local-credentialless.webcontainer-api.io') || 
+        baseUrl.includes('localhost') || 
+        baseUrl.includes('127.0.0.1')) {
+      console.warn('Local development URL detected in production environment, sending auto-response instead');
       await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
       return;
     }
@@ -316,13 +333,13 @@ async function sendAutoResponse(
     
     switch (chatbotType) {
       case 'education':
-        responseMessage = 'Merci pour votre message concernant l\'éducation. Notre service est actuellement en maintenance. Nous vous répondrons dès que possible.';
+        responseMessage = 'Merci pour votre message concernant l\'éducation. Votre question a été reçue et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
         break;
       case 'quiz':
-        responseMessage = 'Merci pour votre intérêt pour nos quiz. Notre service est actuellement en maintenance. Nous vous répondrons dès que possible.';
+        responseMessage = 'Merci pour votre intérêt pour nos quiz. Votre demande a été enregistrée et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
         break;
       default:
-        responseMessage = 'Merci pour votre message. Notre service est actuellement en maintenance. Nous vous répondrons dès que possible.';
+        responseMessage = 'Merci pour votre message au service client. Votre demande a été enregistrée et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
     }
     
     // Send response via WhatsApp API
