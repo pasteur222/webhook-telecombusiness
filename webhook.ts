@@ -212,14 +212,18 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
     const baseUrl = process.env.BOLT_WEBHOOK_ENDPOINT;
     
     if (!baseUrl) {
-      throw new Error('BOLT_WEBHOOK_ENDPOINT environment variable is not set');
+      console.warn('BOLT_WEBHOOK_ENDPOINT not set, skipping status update forwarding');
+      return;
     }
     
     // Construct the endpoint URL for status updates
     // Ensure we don't have double slashes in the URL
-    const endpoint = new URL('/api/whatsapp/status', baseUrl).toString();
-    const endpoint = new URL('/api/whatsapp/status', baseUrl).toString();
-    const endpoint = new URL('/api/whatsapp/status', baseUrl).toString();
+    const endpoint = baseUrl ? new URL('/api/whatsapp/status', baseUrl).toString() : null;
+    
+    if (!endpoint) {
+      console.warn('No endpoint available for status updates, skipping');
+      return;
+    }
     
     // Send the status update
     await axios.post(endpoint, {
@@ -254,27 +258,45 @@ async function forwardMessage(
     const baseUrl = process.env.BOLT_WEBHOOK_ENDPOINT;
     
     if (!baseUrl) {
-      throw new Error('BOLT_WEBHOOK_ENDPOINT environment variable is not set');
+      console.warn('BOLT_WEBHOOK_ENDPOINT not set, skipping message forwarding');
+      return;
     }
     
     // Construct the endpoint URL
     // Ensure we don't have double slashes in the URL
-    const endpoint = new URL(`/api/chatbot/${chatbotType}`, baseUrl).toString();
-    const endpoint = new URL(`/api/chatbot/${chatbotType}`, baseUrl).toString();
-    const endpoint = new URL(`/api/chatbot/${chatbotType}`, baseUrl).toString();
+    const endpoint = baseUrl ? new URL(`/api/chatbot/${chatbotType}`, baseUrl).toString() : null;
     
-    console.log(`Forwarding message to ${endpoint}`);
+    if (!endpoint) {
+      console.warn(`No endpoint available for ${chatbotType} chatbot, skipping message forwarding`);
+      return;
+    }
+    
+    console.log(`Attempting to forward message to ${endpoint}`);
     
     // Send the message to the appropriate endpoint
     const response = await axios.post(endpoint, messageData, {
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.META_ACCESS_TOKEN || ''}`
       }
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: messageData.from,
+        type: 'text',
+        text: { 
+          body: `Nous avons bien reçu votre message: "${messageData.text}". Notre équipe vous répondra bientôt.` 
+        }
+      })
     });
     
-    console.log(`Message forwarded successfully: ${response.status}`);
+    if (!response.ok) {
+      throw new Error(`Failed to send WhatsApp response: ${response.status} ${response.statusText}`);
+    }
+    
+    console.log(`Auto-response sent successfully: ${response.status}`);
   } catch (error) {
-    console.error(`Error forwarding message to ${chatbotType} chatbot:`, error);
+    console.error(`Error sending auto-response for ${chatbotType} message:`, error);
     throw error;
   }
 }
