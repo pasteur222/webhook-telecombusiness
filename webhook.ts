@@ -224,8 +224,9 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
       return;
     }
     
-    // Construct the endpoint URL for status updates
-    const endpoint = baseUrl ? new URL('/api/whatsapp/status', baseUrl).toString() : null;
+    // Use the Edge Function endpoint directly for status updates
+    // The Edge Function will handle routing based on the request body
+    const endpoint = baseUrl;
     
     if (!endpoint) {
       console.warn('No endpoint available for status updates, skipping');
@@ -234,6 +235,7 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
     
     // Send the status update
     await axios.post(endpoint, {
+      type: 'status_update',
       phoneNumberId,
       messageId,
       recipientId,
@@ -247,7 +249,7 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
     
     console.log(`Status update forwarded successfully`);
   } catch (error) {
-    console.error('Error handling status update:', error);
+    console.error('Error handling status update:', error.response?.data || error.message);
   }
 }
 
