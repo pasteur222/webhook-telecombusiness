@@ -303,7 +303,12 @@ async function forwardMessage(
     console.log(`Message forwarded successfully: ${response.status}`);
   } catch (error) {
     console.error(`Error forwarding message:`, error);
-    console.log('Sending auto-response instead');
+    
+    const axiosError = error as any;
+    if (axios.isAxiosError(axiosError)) {
+      console.error('Response data:', axiosError.response?.data);
+    }
+    
     await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
   }
 }
@@ -365,6 +370,11 @@ async function sendAutoResponse(
     console.log(`Auto-response sent successfully: ${response.status}`);
   } catch (error) {
     console.error(`Error sending auto-response:`, error);
+    
+    const axiosError = error as any;
+    if (axios.isAxiosError(axiosError)) {
+      console.error('Response data:', axiosError.response?.data);
+    }
   }
 }
 
@@ -399,9 +409,12 @@ app.get('/templates/:businessAccountId', async (req: Request, res: Response) => 
   } catch (error) {
     console.error('Error fetching templates:', error);
     
-    if (axios.isAxiosError(error)) {
-      const status = error.response?.status || 500;
-      const errorData = error.response?.data || 'Error fetching templates';
+    const axiosError = error as any;
+    if (axios.isAxiosError(axiosError)) {
+      console.error('Response data:', axiosError.response?.data);
+      console.error('Response status:', axiosError.response?.status);
+      const status = axiosError.response?.status || 500;
+      const errorData = axiosError.response?.data || { error: 'Error fetching templates' };
       return res.status(status).json({ error: errorData });
     }
     
