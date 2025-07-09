@@ -301,12 +301,11 @@ async function forwardMessage(
     });
     
     console.log(`Message forwarded successfully: ${response.status}`);
-  } catch (error) {
+  } catch (error: unknown) {
     console.error(`Error forwarding message:`, error);
     
-    const axiosError = error as any;
-    if (axios.isAxiosError(axiosError)) {
-      console.error('Response data:', axiosError.response?.data);
+    if (axios.isAxiosError(error)) {
+      console.error('Response data:', error.response?.data);
     }
     
     await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
@@ -368,12 +367,11 @@ async function sendAutoResponse(
     );
     
     console.log(`Auto-response sent successfully: ${response.status}`);
-  } catch (error) {
+  } catch (error: unknown) {
     console.error(`Error sending auto-response:`, error);
     
-    const axiosError = error as any;
-    if (axios.isAxiosError(axiosError)) {
-      console.error('Response data:', axiosError.response?.data);
+    if (axios.isAxiosError(error)) {
+      console.error('Response data:', error.response?.data);
     }
   }
 }
