@@ -6,9 +6,16 @@ import dotenv from 'dotenv';
 // Load environment variables
 dotenv.config();
 
+// Get Supabase service role key from environment variables
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
 // Initialize Express app
 const app = express();
 const port = process.env.PORT || 3000;
+
+// Supabase authentication
+const SUPABASE_URL = 'https://tyeysspawsupdgaowrec.supabase.co';
+const SUPABASE_FUNCTION_PATH = '/functions/v1/api-chatbot';
 
 // CORS headers
 const corsHeaders = {
@@ -214,7 +221,13 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
     console.log(`Status update for message ${messageId}: ${statusType}`);
     
     // Hardcoded Supabase Edge Function URL
-    const endpoint = 'https://tyeysspawsupdgaowrec.supabase.co/functions/v1/api-chatbot';
+    const endpoint = `${SUPABASE_URL}${SUPABASE_FUNCTION_PATH}`;
+    
+    // Check if we have the service role key
+    if (!SUPABASE_SERVICE_ROLE_KEY) {
+      console.error('SUPABASE_SERVICE_ROLE_KEY is not set in environment variables');
+      return;
+    }
     
     if (!endpoint) {
       console.warn('No endpoint available for status updates, skipping');
@@ -228,10 +241,13 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
       messageId,
       recipientId,
       status: statusType,
-      timestamp
+      timestamp,
+      // Add any additional data needed by the status handler
+      phoneNumber: recipientId
     }, {
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
       }
     });
     
@@ -264,7 +280,14 @@ async function forwardMessage(
   try {
     // Get the base URL from environment variables
     // Hardcoded Supabase Edge Function URL
-    const endpoint = 'https://tyeysspawsupdgaowrec.supabase.co/functions/v1/api-chatbot';
+    const endpoint = `${SUPABASE_URL}${SUPABASE_FUNCTION_PATH}`;
+    
+    // Check if we have the service role key
+    if (!SUPABASE_SERVICE_ROLE_KEY) {
+      console.error('SUPABASE_SERVICE_ROLE_KEY is not set in environment variables');
+      await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
+      return;
+    }
     
     if (!endpoint) {
       console.warn(`No endpoint available for ${chatbotType} chatbot, sending auto-response instead`);
@@ -283,7 +306,7 @@ async function forwardMessage(
     const response = await axios.post(endpoint, messageDataWithType, {
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.META_ACCESS_TOKEN || ''}`
+        'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
       }
     });
     
@@ -388,7 +411,13 @@ async function sendAutoResponse(
 app.get('/templates/:businessAccountId', async (req: Request, res: Response) => {
   try {
     const { businessAccountId } = req.params;
-    const accessToken = req.headers.authorization?.split(' ')[1];
+    // Use the authorization header from the request or fall back to the environment variable
+    let accessToken = req.headers.authorization?.split(' ')[1];
+    
+    // If no token in header, use the one from environment variables
+    if (!accessToken) {
+      accessToken = process.env.META_ACCESS_TOKEN;
+    }
     
     if (!accessToken) {
       return res.status(401).json({ error: 'Authorization token required' });
@@ -410,21 +439,26 @@ app.get('/templates/:businessAccountId', async (req: Request, res: Response) => 
     
     res.status(200).json(response.data);
   } catch (error) {
-    console.error('Error fetching templates:', error);
+    console.error('Error fetching templates:');
     
     if (axios.isAxiosError(error)) {
       if (error.response) {
+        // Log the error details
+        console.error('Response status:', error.response.status);
+        console.error('Response data:', error.response.data);
+        
+        // Return appropriate error response
         console.error('Response data:', error.response.data);
         console.error('Response status:', error.response.status);
         const status = error.response.status || 500;
-        const errorData = error.response.data || { error: 'Error fetching templates' };
+        const errorData = error.response?.data || { error: 'Error fetching templates' };
         return res.status(status).json({ error: errorData });
       }
-      return res.status(500).json({ error: error.message || 'Error fetching templates' });
-    } else if (error instanceof Error) {
+      return res.status(500).json({ error: String(error) || 'Error fetching templates' });
+    } else {
       const status = 500;
-      const errorData = { error: error.message || 'Error fetching templates' };
-      return res.status(status).json({ error: errorData });
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return res.status(status).json({ error: errorMessage || 'Error fetching templates' });
     } else {
       return res.status(500).json({ error: 'Unknown error fetching templates' });
     }
