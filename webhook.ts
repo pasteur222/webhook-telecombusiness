@@ -213,25 +213,8 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
     
     console.log(`Status update for message ${messageId}: ${statusType}`);
     
-    // Forward the status update to the main application
-    const baseUrl = process.env.BOLT_WEBHOOK_ENDPOINT;
-    
-    if (!baseUrl) {
-      console.warn('BOLT_WEBHOOK_ENDPOINT not set or empty, skipping status update forwarding');
-      return;
-    }
-    
-    // Check if the URL is a local development URL
-    if (baseUrl.includes('local-credentialless.webcontainer-api.io') || 
-        baseUrl.includes('localhost') || 
-        baseUrl.includes('127.0.0.1')) {
-      console.warn('Local development URL detected in production environment, skipping status update forwarding');
-      return;
-    }
-    
-    // Use the Edge Function endpoint directly for status updates
-    // The Edge Function will handle routing based on the request body
-    const endpoint = baseUrl;
+    // Hardcoded Supabase Edge Function URL
+    const endpoint = 'https://tyeysspawsupdgaowrec.supabase.co/functions/v1/api-chatbot';
     
     if (!endpoint) {
       console.warn('No endpoint available for status updates, skipping');
@@ -280,25 +263,8 @@ async function forwardMessage(
 ): Promise<void> {
   try {
     // Get the base URL from environment variables
-    const baseUrl = process.env.BOLT_WEBHOOK_ENDPOINT;
-    
-    if (!baseUrl) {
-      console.warn('BOLT_WEBHOOK_ENDPOINT not set or empty, sending auto-response instead');
-      await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
-      return;
-    }
-    
-    // Check if the URL is a local development URL
-    if (baseUrl.includes('local-credentialless.webcontainer-api.io') || 
-        baseUrl.includes('localhost') || 
-        baseUrl.includes('127.0.0.1')) {
-      console.warn('Local development URL detected in production environment, sending auto-response instead');
-      await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
-      return;
-    }
-    
-    // Construct the endpoint URL
-    const endpoint = baseUrl ? new URL(`/api/chatbot/${chatbotType}`, baseUrl).toString() : null;
+    // Hardcoded Supabase Edge Function URL
+    const endpoint = 'https://tyeysspawsupdgaowrec.supabase.co/functions/v1/api-chatbot';
     
     if (!endpoint) {
       console.warn(`No endpoint available for ${chatbotType} chatbot, sending auto-response instead`);
@@ -308,8 +274,13 @@ async function forwardMessage(
     
     console.log(`Attempting to forward message to ${endpoint}`);
     
+    // Add chatbot type to the message data
+    const messageDataWithType = {
+      ...messageData,
+      chatbotType
+    };
     // Send the message to the appropriate endpoint
-    const response = await axios.post(endpoint, messageData, {
+    const response = await axios.post(endpoint, messageDataWithType, {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${process.env.META_ACCESS_TOKEN || ''}`
