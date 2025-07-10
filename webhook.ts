@@ -459,8 +459,6 @@ app.get('/templates/:businessAccountId', async (req: Request, res: Response) => 
       const status = 500;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       return res.status(status).json({ error: errorMessage || 'Error fetching templates' });
-    } else {
-      return res.status(500).json({ error: 'Unknown error fetching templates' });
     }
   }
 });
