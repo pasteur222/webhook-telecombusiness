@@ -78,8 +78,24 @@ function determineChatbotType(message: string): 'client' | 'education' | 'quiz' 
     return 'quiz';
   }
   
-  // Default to client support if no other matches
-  return 'client';
+  // Check for client support keywords
+  if (TRIGGER_KEYWORDS.CLIENT.some(keyword => lowerMessage.includes(keyword))) {
+    return 'client';
+  }
+  
+  // If the message is literally "client", "education", or "quiz", return that directly
+  if (lowerMessage === 'client' || lowerMessage === 'service client') {
+    return 'client';
+  }
+  if (lowerMessage === 'education') {
+    return 'education';
+  }
+  if (lowerMessage === 'quiz') {
+    return 'quiz';
+  }
+  
+  // Default to education if no other matches (changed from client to ensure compatibility)
+  return 'education';
 }
 
 /**
@@ -297,11 +313,16 @@ async function forwardMessage(
     
     console.log(`Attempting to forward message to ${endpoint}`);
     
-    // Add chatbot type to the message data
+    // Ensure the chatbotType is correctly formatted for the API
+    // The API expects 'client', 'education', or 'quiz'
+    let formattedChatbotType = chatbotType;
+    
+    // Add chatbot type to the message data with proper validation
     const messageDataWithType = {
       ...messageData,
-      chatbotType
+      chatbotType: formattedChatbotType
     };
+    
     // Send the message to the appropriate endpoint
     const response = await axios.post(endpoint, messageDataWithType, {
       headers: {
