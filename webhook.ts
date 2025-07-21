@@ -320,11 +320,24 @@ async function forwardMessage(
     // Add chatbot type to the message data with proper validation
     const messageDataWithType = {
       ...messageData,
-      chatbotType: formattedChatbotType
+      chatbotType: formattedChatbotType,
+      from: messageData.from,
+      text: messageData.text || messageData.messageText,
+      timestamp: messageData.timestamp,
+      messageId: messageData.messageId
     };
     
+    console.log('Sending payload to Edge Function:', JSON.stringify(messageDataWithType, null, 2));
+    
     // Send the message to the appropriate endpoint
-    const response = await axios.post(endpoint, messageDataWithType, {
+    const response = await axios.post(endpoint, {
+      from: messageData.from,
+      text: messageData.text || messageData.messageText,
+      phoneNumberId: messageData.phoneNumberId,
+      messageId: messageData.messageId,
+      timestamp: messageData.timestamp,
+      chatbotType: formattedChatbotType
+    }, {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
@@ -332,6 +345,7 @@ async function forwardMessage(
     });
     
     console.log(`Message forwarded successfully: ${response.status}`);
+    console.log('Edge Function response:', response.data);
   } catch (error) {
     console.error(`Error forwarding message:`);
     
