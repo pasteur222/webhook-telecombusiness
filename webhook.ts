@@ -346,6 +346,27 @@ async function forwardMessage(
     
     console.log(`Message forwarded successfully: ${response.status}`);
     console.log('Edge Function response:', response.data);
+    
+    // ✅ NEW: Check if Edge Function returned a successful response with content
+    if (response.data && response.data.success && response.data.response) {
+      console.log(`📤 Edge Function provided response: "${response.data.response}"`);
+      console.log(`📱 Sending response back to WhatsApp user: ${messageData.from}`);
+      
+      // Use the existing sendAutoResponse function to send the chatbot response
+      await sendAutoResponse(
+        messageData.phoneNumberId, 
+        messageData.from, 
+        response.data.response, // Use the actual chatbot response
+        chatbotType
+      );
+      
+      console.log(`✅ Chatbot response sent successfully to ${messageData.from}`);
+    } else {
+      console.log(`❌ Edge Function did not provide a valid response:`, response.data);
+      
+      // Fallback to auto-response if Edge Function failed
+      await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
+    }
   } catch (error) {
     console.error(`Error forwarding message:`);
     
@@ -362,6 +383,8 @@ async function forwardMessage(
       console.error('Unknown error:', error);
     }
     
+    // ✅ UPDATED: Only send fallback auto-response if Edge Function completely failed
+    console.log(`⚠️ Edge Function failed, sending fallback auto-response`);
     await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
   }
 }
@@ -370,13 +393,13 @@ async function forwardMessage(
  * Send an automatic response when forwarding fails
  * @param phoneNumberId The phone number ID to use for sending
  * @param to The recipient's phone number
- * @param originalMessage The original message received
+ * @param messageToSend The message to send (can be chatbot response or fallback)
  * @param chatbotType The type of chatbot that would have handled the message
  */
 async function sendAutoResponse(
   phoneNumberId: string,
   to: string,
-  originalMessage: string,
+  messageToSend: string,
   chatbotType: 'client' | 'education' | 'quiz'
 ): Promise<void> {
   try {
@@ -388,18 +411,27 @@ async function sendAutoResponse(
       return;
     }
     
-    // Prepare response message based on chatbot type
+    // If messageToSend looks like a chatbot response (longer than 50 chars), use it directly
+    // Otherwise, prepare fallback message based on chatbot type
     let responseMessage = '';
     
-    switch (chatbotType) {
-      case 'education':
-        responseMessage = 'Merci pour votre message concernant l\'éducation. Votre question a été reçue et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
-        break;
-      case 'quiz':
-        responseMessage = 'Merci pour votre intérêt pour nos quiz. Votre demande a été enregistrée et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
-        break;
-      default:
-        responseMessage = 'Merci pour votre message au service client. Votre demande a été enregistrée et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
+    if (messageToSend.length > 50 && !messageToSend.toLowerCase().includes('error')) {
+      // This looks like a proper chatbot response, use it directly
+      responseMessage = messageToSend;
+      console.log(`📤 Using chatbot response: "${responseMessage.substring(0, 50)}..."`);
+    } else {
+      // This is a fallback case, use default messages
+      console.log(`📤 Using fallback message for chatbot type: ${chatbotType}`);
+      switch (chatbotType) {
+        case 'education':
+          responseMessage = 'Merci pour votre message concernant l\'éducation. Votre question a été reçue et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
+          break;
+        case 'quiz':
+          responseMessage = 'Merci pour votre intérêt pour nos quiz. Votre demande a été enregistrée et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
+          break;
+        default:
+          responseMessage = 'Merci pour votre message au service client. Votre demande a été enregistrée et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
+      }
     }
     
     // Send response via WhatsApp API
@@ -420,9 +452,10 @@ async function sendAutoResponse(
       }
     );
     
-    console.log(`Auto-response sent successfully: ${response.status}`);
+    console.log(`✅ WhatsApp message sent successfully: ${response.status}`);
+    console.log(`📱 Message sent to ${to}: "${responseMessage.substring(0, 50)}..."`);
   } catch (error) {
-    console.error(`Error sending auto-response:`);
+    console.error(`❌ Error sending WhatsApp message:`);
     
     if (axios.isAxiosError(error)) {
       if (error.response) {
