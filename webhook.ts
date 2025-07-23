@@ -184,6 +184,9 @@ app.post('/webhook', async (req: Request, res: Response) => {
                 
                 console.log(`Received ${message.type} from ${from} with ID: ${mediaId}`);
                 
+                // Download the media file from WhatsApp API
+                const mediaUrl = await downloadWhatsAppMedia(mediaId, phoneNumberId);
+                
                 // For media messages, default to education chatbot as it's likely
                 // students sending homework problems or educational content
                 const chatbotType = 'education';
@@ -192,6 +195,8 @@ app.post('/webhook', async (req: Request, res: Response) => {
                 await forwardMessage(chatbotType, {
                   phoneNumberId,
                   from,
+                  text: `[${message.type.toUpperCase()}]`, // Placeholder text
+                  imageUrl: mediaUrl, // Add the actual image URL
                   mediaType: message.type,
                   mediaId,
                   mimeType,
@@ -281,6 +286,64 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
     } else {
       console.error('Unknown error:', error);
     }
+  }
+}
+
+/**
+ * Download media file from WhatsApp API and return public URL
+ * @param mediaId The media ID from WhatsApp
+ * @param phoneNumberId The phone number ID for API access
+ * @returns Public URL of the downloaded media
+ */
+async function downloadWhatsAppMedia(mediaId: string, phoneNumberId: string): Promise<string | null> {
+  try {
+    console.log(`📥 [MEDIA] Downloading media with ID: ${mediaId}`);
+    
+    // Get access token from environment variables
+    const accessToken = process.env.META_ACCESS_TOKEN;
+    
+    if (!accessToken) {
+      console.error('❌ [MEDIA] META_ACCESS_TOKEN environment variable is not set');
+      return null;
+    }
+    
+    // Step 1: Get media URL from WhatsApp API
+    const mediaInfoResponse = await axios.get(
+      `https://graph.facebook.com/v19.0/${mediaId}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`
+        }
+      }
+    );
+    
+    if (!mediaInfoResponse.data.url) {
+      console.error('❌ [MEDIA] No URL found in media info response');
+      return null;
+    }
+    
+    const mediaUrl = mediaInfoResponse.data.url;
+    console.log(`📥 [MEDIA] Got media URL: ${mediaUrl}`);
+    
+    // Step 2: Download the actual media file
+    const mediaResponse = await axios.get(mediaUrl, {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`
+      },
+      responseType: 'arraybuffer'
+    });
+    
+    // Step 3: Convert to base64 for transmission
+    const base64Data = Buffer.from(mediaResponse.data).toString('base64');
+    const mimeType = mediaResponse.headers['content-type'] || 'image/jpeg';
+    const dataUrl = `data:${mimeType};base64,${base64Data}`;
+    
+    console.log(`✅ [MEDIA] Media downloaded and converted to base64`);
+    return dataUrl;
+    
+  } catch (error) {
+    console.error('❌ [MEDIA] Error downloading media:', error);
+    return null;
   }
 }
 
