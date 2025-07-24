@@ -482,14 +482,6 @@ async function sendAutoResponse(
   chatbotType: 'client' | 'education' | 'quiz'
 ): Promise<void> {
   try {
-    // Get access token from environment variables
-    const accessToken = process.env.META_ACCESS_TOKEN;
-    
-    if (!accessToken) {
-      console.error('META_ACCESS_TOKEN environment variable is not set');
-      return;
-    }
-    
     // Prepare response message based on chatbot type
     let responseMessage = '';
     
@@ -504,41 +496,11 @@ async function sendAutoResponse(
         responseMessage = 'Merci pour votre message au service client. Notre assistant IA traite votre demande et vous répondra sous peu.';
     }
     
-    // Send response via WhatsApp API
-    const response = await axios.post(
-      `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: to,
-        type: 'text',
-        text: { body: responseMessage }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 10000 // 10 second timeout
-      }
-    );
-    
-    console.log(`Auto-response sent successfully: ${response.status}`);
+    // Use the main WhatsApp response function
+    await sendWhatsAppResponse(phoneNumberId, to, responseMessage);
+    console.log(`✅ Auto-response sent successfully to ${to}`);
   } catch (error) {
-    console.error(`Error sending auto-response:`);
-    
-    if (axios.isAxiosError(error)) {
-      if (error.response) {
-        console.error('Response status:', error.response.status);
-        console.error('Response data:', error.response.data);
-      } else {
-        console.error('Error message:', error.message);
-      }
-    } else if (error instanceof Error) {
-      console.error('Error message:', error.message);
-    } else {
-      console.error('Unknown error:', error);
-    }
+    console.error(`❌ Error sending auto-response to ${to}:`, error);
   }
 }
 

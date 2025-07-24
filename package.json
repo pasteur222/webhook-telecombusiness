@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/webhook.js",
-    "dev": "ts-node webhook.ts"
+    "dev": "ts-node webhook.ts",
+    "audit-fix": "npm audit fix --force"
   },
   "keywords": [
     "webhook",
