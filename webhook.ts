@@ -236,8 +236,8 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
     
     console.log(`Status update for message ${messageId}: ${statusType}`);
     
-    // Hardcoded Supabase Edge Function URL
-    const endpoint = `${SUPABASE_URL}${SUPABASE_FUNCTION_PATH}`;
+    // Use status-specific endpoint
+    const endpoint = `${SUPABASE_URL}/functions/v1/status-handler`;
     
     // Check if we have the service role key
     if (!SUPABASE_SERVICE_ROLE_KEY) {
@@ -245,21 +245,13 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
       return;
     }
     
-    if (!endpoint) {
-      console.warn('No endpoint available for status updates, skipping');
-      return;
-    }
-    
     // Send the status update
     await axios.post(endpoint, {
-      type: 'status_update',
-      phoneNumberId,
       messageId,
-      recipientId,
       status: statusType,
       timestamp,
-      // Add any additional data needed by the status handler
-      phoneNumber: recipientId
+      phoneNumber: recipientId,
+      phoneNumberId
     }, {
       headers: {
         'Content-Type': 'application/json',
@@ -347,15 +339,34 @@ async function forwardMessage(
       }
     }
     
+    console.log('Sending payload to Edge Function:', JSON.stringify(messageDataWithType, null, 2));
+    
     // Send the message to the appropriate endpoint
     const response = await axios.post(endpoint, messageDataWithType, {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
-      }
+      },
+      timeout: 30000, // 30 second timeout
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
     });
     
     console.log(`Message forwarded successfully: ${response.status}`);
+    console.log('Edge Function response:', response.data);
+    
+    // Handle the response from Edge Function
+    if (response.data && response.data.response) {
+      console.log(`📤 Edge Function provided response: "${response.data.response}"`);
+      console.log(`📱 Sending response back to WhatsApp user: ${messageData.from}`);
+      
+      // Send the AI response back to WhatsApp
+      await sendChatbotResponse(
+        messageData.phoneNumberId,
+        messageData.from,
+        response.data.response
+      );
+    }
   } catch (error) {
     console.error(`Error forwarding message:`);
     
@@ -363,8 +374,30 @@ async function forwardMessage(
       if (error.response) {
         console.error('Response status:', error.response.status);
         console.error('Response data:', error.response.data);
+        
+        // Handle specific error cases
+        if (error.response.status === 500) {
+          await sendAutoResponse(
+            messageData.phoneNumberId, 
+            messageData.from, 
+            "Je rencontre des difficultés techniques temporaires. Veuillez réessayer dans quelques instants.", 
+            chatbotType
+          );
+        }
       } else {
         console.error('Error message:', error.message);
+        
+        // Handle network errors
+        if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+          await sendAutoResponse(
+            messageData.phoneNumberId, 
+            messageData.from, 
+            "Le traitement de votre message prend plus de temps que prévu. Veuillez réessayer.", 
+            chatbotType
+          );
+        } else {
+          await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
+        }
       }
     } else if (error instanceof Error) {
       console.error('Error message:', error.message);
@@ -387,18 +420,26 @@ async function getWhatsAppMediaUrl(mediaId: string, phoneNumberId: string): Prom
       throw new Error('META_ACCESS_TOKEN not configured');
     }
     
+    console.log(`📱 [WEBHOOK] Getting media info for ID: ${mediaId}`);
+    
     // First, get media info
     const mediaInfoResponse = await axios.get(
       `https://graph.facebook.com/v19.0/${mediaId}`,
       {
         headers: {
           'Authorization': `Bearer ${accessToken}`
-        }
+        },
+        timeout: 10000 // 10 second timeout
       }
     );
     
     const mediaInfo = mediaInfoResponse.data;
     console.log('📱 [WEBHOOK] Media info retrieved:', mediaInfo);
+    
+    // Check file size limit (5MB for images)
+    if (mediaInfo.file_size > 5 * 1024 * 1024) {
+      throw new Error(`Image too large: ${mediaInfo.file_size} bytes. Maximum size is 5MB.`);
+    }
     
     // Then get the actual media URL
     const mediaUrlResponse = await axios.get(
@@ -407,7 +448,9 @@ async function getWhatsAppMediaUrl(mediaId: string, phoneNumberId: string): Prom
         headers: {
           'Authorization': `Bearer ${accessToken}`
         },
-        responseType: 'arraybuffer'
+        responseType: 'arraybuffer',
+        timeout: 15000, // 15 second timeout
+        maxContentLength: 5 * 1024 * 1024 // 5MB limit
       }
     );
     
@@ -452,13 +495,13 @@ async function sendAutoResponse(
     
     switch (chatbotType) {
       case 'education':
-        responseMessage = 'Merci pour votre message concernant l\'éducation. Votre question a été reçue et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
+        responseMessage = 'Merci pour votre message éducatif. Notre assistant IA traite votre demande. Si vous avez envoyé une image, assurez-vous qu\'elle soit claire et précisez le type de contenu (lettre, dissertation, exercice de maths, etc.).';
         break;
       case 'quiz':
-        responseMessage = 'Merci pour votre intérêt pour nos quiz. Votre demande a été enregistrée et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
+        responseMessage = 'Merci pour votre intérêt pour nos quiz. Notre système traite votre demande. Tapez "quiz" pour commencer un nouveau jeu.';
         break;
       default:
-        responseMessage = 'Merci pour votre message au service client. Votre demande a été enregistrée et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
+        responseMessage = 'Merci pour votre message au service client. Notre assistant IA traite votre demande et vous répondra sous peu.';
     }
     
     // Send response via WhatsApp API
@@ -475,7 +518,8 @@ async function sendAutoResponse(
         headers: {
           'Authorization': `Bearer ${accessToken}`,
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 10000 // 10 second timeout
       }
     );
     
