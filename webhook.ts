@@ -111,7 +111,7 @@ app.get('/webhook', (req: Request, res: Response) => {
   // Check if a token and mode were sent
   if (mode && token) {
     // Check the mode and token sent are correct
-    if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
+    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
       // Respond with the challenge token from the request
       console.log('WEBHOOK_VERIFIED');
       res.status(200).send(challenge);
@@ -361,7 +361,7 @@ async function forwardMessage(
       console.log(`📱 Sending response back to WhatsApp user: ${messageData.from}`);
       
       // Send the AI response back to WhatsApp
-      await sendChatbotResponse(
+      await sendWhatsAppResponse(
         messageData.phoneNumberId,
         messageData.from,
         response.data.response
@@ -497,7 +497,7 @@ async function sendAutoResponse(
     }
     
     // Use the main WhatsApp response function
-    await sendWhatsAppResponse(phoneNumberId, to, responseMessage);
+    await sendWhatsAppMessage(phoneNumberId, to, responseMessage);
     console.log(`✅ Auto-response sent successfully to ${to}`);
   } catch (error) {
     console.error(`❌ Error sending auto-response to ${to}:`, error);
