@@ -111,7 +111,7 @@ app.get('/webhook', (req: Request, res: Response) => {
   // Check if a token and mode were sent
   if (mode && token) {
     // Check the mode and token sent are correct
-    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
       // Respond with the challenge token from the request
       console.log('WEBHOOK_VERIFIED');
       res.status(200).send(challenge);
@@ -184,6 +184,9 @@ app.post('/webhook', async (req: Request, res: Response) => {
                 
                 console.log(`Received ${message.type} from ${from} with ID: ${mediaId}`);
                 
+                // Download the media file from WhatsApp API
+                const mediaUrl = await downloadWhatsAppMedia(mediaId, phoneNumberId);
+                
                 // For media messages, default to education chatbot as it's likely
                 // students sending homework problems or educational content
                 const chatbotType = 'education';
@@ -192,6 +195,8 @@ app.post('/webhook', async (req: Request, res: Response) => {
                 await forwardMessage(chatbotType, {
                   phoneNumberId,
                   from,
+                  text: `[${message.type.toUpperCase()}]`, // Placeholder text
+                  imageUrl: mediaUrl, // Add the actual image URL
                   mediaType: message.type,
                   mediaId,
                   mimeType,
@@ -236,8 +241,8 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
     
     console.log(`Status update for message ${messageId}: ${statusType}`);
     
-    // Use status-specific endpoint
-    const endpoint = `${SUPABASE_URL}/functions/v1/status-handler`;
+    // Hardcoded Supabase Edge Function URL
+    const endpoint = `${SUPABASE_URL}${SUPABASE_FUNCTION_PATH}`;
     
     // Check if we have the service role key
     if (!SUPABASE_SERVICE_ROLE_KEY) {
@@ -245,13 +250,21 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
       return;
     }
     
+    if (!endpoint) {
+      console.warn('No endpoint available for status updates, skipping');
+      return;
+    }
+    
     // Send the status update
     await axios.post(endpoint, {
+      type: 'status_update',
+      phoneNumberId,
       messageId,
+      recipientId,
       status: statusType,
       timestamp,
-      phoneNumber: recipientId,
-      phoneNumberId
+      // Add any additional data needed by the status handler
+      phoneNumber: recipientId
     }, {
       headers: {
         'Content-Type': 'application/json',
@@ -277,6 +290,64 @@ async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<v
 }
 
 /**
+ * Download media file from WhatsApp API and return public URL
+ * @param mediaId The media ID from WhatsApp
+ * @param phoneNumberId The phone number ID for API access
+ * @returns Public URL of the downloaded media
+ */
+async function downloadWhatsAppMedia(mediaId: string, phoneNumberId: string): Promise<string | null> {
+  try {
+    console.log(`📥 [MEDIA] Downloading media with ID: ${mediaId}`);
+    
+    // Get access token from environment variables
+    const accessToken = process.env.META_ACCESS_TOKEN;
+    
+    if (!accessToken) {
+      console.error('❌ [MEDIA] META_ACCESS_TOKEN environment variable is not set');
+      return null;
+    }
+    
+    // Step 1: Get media URL from WhatsApp API
+    const mediaInfoResponse = await axios.get(
+      `https://graph.facebook.com/v19.0/${mediaId}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`
+        }
+      }
+    );
+    
+    if (!mediaInfoResponse.data.url) {
+      console.error('❌ [MEDIA] No URL found in media info response');
+      return null;
+    }
+    
+    const mediaUrl = mediaInfoResponse.data.url;
+    console.log(`📥 [MEDIA] Got media URL: ${mediaUrl}`);
+    
+    // Step 2: Download the actual media file
+    const mediaResponse = await axios.get(mediaUrl, {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`
+      },
+      responseType: 'arraybuffer'
+    });
+    
+    // Step 3: Convert to base64 for transmission
+    const base64Data = Buffer.from(mediaResponse.data).toString('base64');
+    const mimeType = mediaResponse.headers['content-type'] || 'image/jpeg';
+    const dataUrl = `data:${mimeType};base64,${base64Data}`;
+    
+    console.log(`✅ [MEDIA] Media downloaded and converted to base64`);
+    return dataUrl;
+    
+  } catch (error) {
+    console.error('❌ [MEDIA] Error downloading media:', error);
+    return null;
+  }
+}
+
+/**
  * Forward the message to the appropriate chatbot endpoint
  * @param chatbotType The type of chatbot to handle the message
  * @param messageData The message data to forward
@@ -286,8 +357,6 @@ async function forwardMessage(
   messageData: any
 ): Promise<void> {
   try {
-    console.log(`📤 [WEBHOOK] Forwarding ${messageData.mediaType ? 'media' : 'text'} message to ${chatbotType} chatbot`);
-    
     // Get the base URL from environment variables
     // Hardcoded Supabase Edge Function URL
     const endpoint = `${SUPABASE_URL}${SUPABASE_FUNCTION_PATH}`;
@@ -311,61 +380,54 @@ async function forwardMessage(
     // The API expects 'client', 'education', or 'quiz'
     let formattedChatbotType = chatbotType;
     
-    // Enhanced message data with better image handling
-    let messageDataWithType = {
+    // Add chatbot type to the message data with proper validation
+    const messageDataWithType = {
       ...messageData,
-      chatbotType: formattedChatbotType
+      chatbotType: formattedChatbotType,
+      from: messageData.from,
+      text: messageData.text || messageData.messageText,
+      timestamp: messageData.timestamp,
+      messageId: messageData.messageId
     };
-    
-    // Enhanced image message handling
-    if (messageData.mediaType && (messageData.mediaType === 'image' || messageData.mediaType === 'video' || messageData.mediaType === 'document')) {
-      console.log(`🖼️ [WEBHOOK] Processing ${messageData.mediaType} message`);
-      
-      // For image messages, we need to get the media URL from WhatsApp
-      if (messageData.mediaId) {
-        try {
-          const mediaUrl = await getWhatsAppMediaUrl(messageData.mediaId, messageData.phoneNumberId);
-          messageDataWithType = {
-            ...messageDataWithType,
-            imageUrl: mediaUrl,
-            text: '[IMAGE]', // Special marker for image messages
-            originalText: messageData.text || ''
-          };
-          console.log(`✅ [WEBHOOK] Media URL retrieved: ${mediaUrl}`);
-        } catch (mediaError) {
-          console.error('❌ [WEBHOOK] Failed to get media URL:', mediaError);
-          // Continue with text processing as fallback
-        }
-      }
-    }
     
     console.log('Sending payload to Edge Function:', JSON.stringify(messageDataWithType, null, 2));
     
     // Send the message to the appropriate endpoint
-    const response = await axios.post(endpoint, messageDataWithType, {
+    const response = await axios.post(endpoint, {
+      from: messageData.from,
+      text: messageData.text || messageData.messageText,
+      phoneNumberId: messageData.phoneNumberId,
+      messageId: messageData.messageId,
+      timestamp: messageData.timestamp,
+      chatbotType: formattedChatbotType
+    }, {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
-      },
-      timeout: 30000, // 30 second timeout
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity
+      }
     });
     
     console.log(`Message forwarded successfully: ${response.status}`);
     console.log('Edge Function response:', response.data);
     
-    // Handle the response from Edge Function
-    if (response.data && response.data.response) {
+    // ✅ NEW: Check if Edge Function returned a successful response with content
+    if (response.data && response.data.success && response.data.response) {
       console.log(`📤 Edge Function provided response: "${response.data.response}"`);
       console.log(`📱 Sending response back to WhatsApp user: ${messageData.from}`);
       
-      // Send the AI response back to WhatsApp
-      await sendWhatsAppResponse(
-        messageData.phoneNumberId,
-        messageData.from,
+      // Send the actual chatbot response directly
+      await sendChatbotResponse(
+        messageData.phoneNumberId, 
+        messageData.from, 
         response.data.response
       );
+      
+      console.log(`✅ Chatbot response sent successfully to ${messageData.from}`);
+    } else {
+      console.log(`❌ Edge Function did not provide a valid response:`, response.data);
+      
+      // Fallback to auto-response if Edge Function failed
+      await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
     }
   } catch (error) {
     console.error(`Error forwarding message:`);
@@ -374,30 +436,8 @@ async function forwardMessage(
       if (error.response) {
         console.error('Response status:', error.response.status);
         console.error('Response data:', error.response.data);
-        
-        // Handle specific error cases
-        if (error.response.status === 500) {
-          await sendAutoResponse(
-            messageData.phoneNumberId, 
-            messageData.from, 
-            "Je rencontre des difficultés techniques temporaires. Veuillez réessayer dans quelques instants.", 
-            chatbotType
-          );
-        }
       } else {
         console.error('Error message:', error.message);
-        
-        // Handle network errors
-        if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-          await sendAutoResponse(
-            messageData.phoneNumberId, 
-            messageData.from, 
-            "Le traitement de votre message prend plus de temps que prévu. Veuillez réessayer.", 
-            chatbotType
-          );
-        } else {
-          await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
-        }
       }
     } else if (error instanceof Error) {
       console.error('Error message:', error.message);
@@ -405,74 +445,81 @@ async function forwardMessage(
       console.error('Unknown error:', error);
     }
     
+    // ✅ UPDATED: Only send fallback auto-response if Edge Function completely failed
+    console.log(`⚠️ Edge Function failed, sending fallback auto-response`);
     await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
   }
 }
 
 /**
- * Get WhatsApp media URL from media ID
+ * Send the actual chatbot response to WhatsApp
+ * @param phoneNumberId The phone number ID to use for sending
+ * @param to The recipient's phone number
+ * @param chatbotResponse The response generated by the chatbot
  */
-async function getWhatsAppMediaUrl(mediaId: string, phoneNumberId: string): Promise<string> {
+async function sendChatbotResponse(
+  phoneNumberId: string,
+  to: string,
+  chatbotResponse: string
+): Promise<void> {
   try {
+    console.log(`📤 [CHATBOT-RESPONSE] Sending chatbot response to ${to}`);
+    console.log(`📤 [CHATBOT-RESPONSE] Response content: "${chatbotResponse.substring(0, 100)}${chatbotResponse.length > 100 ? '...' : ''}"`);
+    
+    // Get access token from environment variables
     const accessToken = process.env.META_ACCESS_TOKEN;
     
     if (!accessToken) {
-      throw new Error('META_ACCESS_TOKEN not configured');
+      console.error('❌ [CHATBOT-RESPONSE] META_ACCESS_TOKEN environment variable is not set');
+      return;
     }
     
-    console.log(`📱 [WEBHOOK] Getting media info for ID: ${mediaId}`);
+    console.log(`📤 [CHATBOT-RESPONSE] Using phone number ID: ${phoneNumberId}`);
+    console.log(`📤 [CHATBOT-RESPONSE] Access token exists: ${!!accessToken}`);
     
-    // First, get media info
-    const mediaInfoResponse = await axios.get(
-      `https://graph.facebook.com/v19.0/${mediaId}`,
+    // Send response via WhatsApp API
+    const response = await axios.post(
+      `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: to,
+        type: 'text',
+        text: { body: chatbotResponse }
+      },
       {
         headers: {
-          'Authorization': `Bearer ${accessToken}`
-        },
-        timeout: 10000 // 10 second timeout
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
       }
     );
     
-    const mediaInfo = mediaInfoResponse.data;
-    console.log('📱 [WEBHOOK] Media info retrieved:', mediaInfo);
-    
-    // Check file size limit (5MB for images)
-    if (mediaInfo.file_size > 5 * 1024 * 1024) {
-      throw new Error(`Image too large: ${mediaInfo.file_size} bytes. Maximum size is 5MB.`);
-    }
-    
-    // Then get the actual media URL
-    const mediaUrlResponse = await axios.get(
-      mediaInfo.url,
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`
-        },
-        responseType: 'arraybuffer',
-        timeout: 15000, // 15 second timeout
-        maxContentLength: 5 * 1024 * 1024 // 5MB limit
-      }
-    );
-    
-    // Convert to base64 for transmission
-    const base64Data = Buffer.from(mediaUrlResponse.data).toString('base64');
-    const mimeType = mediaInfo.mime_type || 'image/jpeg';
-    const dataUrl = `data:${mimeType};base64,${base64Data}`;
-    
-    console.log(`✅ [WEBHOOK] Media converted to data URL (${mimeType})`);
-    return dataUrl;
-    
+    console.log(`✅ [CHATBOT-RESPONSE] WhatsApp message sent successfully: ${response.status}`);
+    console.log(`📱 [CHATBOT-RESPONSE] Exact message sent to ${to}: "${chatbotResponse}"`);
   } catch (error) {
-    console.error('❌ [WEBHOOK] Error getting media URL:', error);
-    throw error;
+    console.error(`❌ [CHATBOT-RESPONSE] Error sending WhatsApp message:`);
+    
+    if (axios.isAxiosError(error)) {
+      if (error.response) {
+        console.error('❌ [CHATBOT-RESPONSE] Response status:', error.response.status);
+        console.error('❌ [CHATBOT-RESPONSE] Response data:', error.response.data);
+      } else {
+        console.error('❌ [CHATBOT-RESPONSE] Error message:', error.message);
+      }
+    } else if (error instanceof Error) {
+      console.error('❌ [CHATBOT-RESPONSE] Error message:', error.message);
+    } else {
+      console.error('❌ [CHATBOT-RESPONSE] Unknown error:', error);
+    }
   }
 }
 
 /**
- * Send an automatic response when forwarding fails
+ * Send an automatic fallback response when Edge Function fails
  * @param phoneNumberId The phone number ID to use for sending
  * @param to The recipient's phone number
- * @param originalMessage The original message received
+ * @param originalMessage The original user message
  * @param chatbotType The type of chatbot that would have handled the message
  */
 async function sendAutoResponse(
@@ -482,25 +529,64 @@ async function sendAutoResponse(
   chatbotType: 'client' | 'education' | 'quiz'
 ): Promise<void> {
   try {
-    // Prepare response message based on chatbot type
+    // Get access token from environment variables
+    const accessToken = process.env.META_ACCESS_TOKEN;
+    
+    if (!accessToken) {
+      console.error('META_ACCESS_TOKEN environment variable is not set');
+      return;
+    }
+    
+    // This function is now only for fallback messages when Edge Function fails
     let responseMessage = '';
+    console.log(`📤 [FALLBACK] Using fallback message for chatbot type: ${chatbotType}`);
     
     switch (chatbotType) {
       case 'education':
-        responseMessage = 'Merci pour votre message éducatif. Notre assistant IA traite votre demande. Si vous avez envoyé une image, assurez-vous qu\'elle soit claire et précisez le type de contenu (lettre, dissertation, exercice de maths, etc.).';
+        responseMessage = 'Merci pour votre message concernant l\'éducation. Votre question a été reçue et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
         break;
       case 'quiz':
-        responseMessage = 'Merci pour votre intérêt pour nos quiz. Notre système traite votre demande. Tapez "quiz" pour commencer un nouveau jeu.';
+        responseMessage = 'Merci pour votre intérêt pour nos quiz. Votre demande a été enregistrée et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
         break;
       default:
-        responseMessage = 'Merci pour votre message au service client. Notre assistant IA traite votre demande et vous répondra sous peu.';
+        responseMessage = 'Merci pour votre message au service client. Votre demande a été enregistrée et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
     }
     
-    // Use the main WhatsApp response function
-    await sendWhatsAppMessage(phoneNumberId, to, responseMessage);
-    console.log(`✅ Auto-response sent successfully to ${to}`);
+    // Send response via WhatsApp API
+    const response = await axios.post(
+      `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: to,
+        type: 'text',
+        text: { body: responseMessage }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    console.log(`✅ [FALLBACK] WhatsApp fallback message sent successfully: ${response.status}`);
+    console.log(`📱 [FALLBACK] Fallback message sent to ${to}: "${responseMessage.substring(0, 50)}..."`);
   } catch (error) {
-    console.error(`❌ Error sending auto-response to ${to}:`, error);
+    console.error(`❌ [FALLBACK] Error sending WhatsApp fallback message:`);
+    
+    if (axios.isAxiosError(error)) {
+      if (error.response) {
+        console.error('❌ [FALLBACK] Response status:', error.response.status);
+        console.error('❌ [FALLBACK] Response data:', error.response.data);
+      } else {
+        console.error('❌ [FALLBACK] Error message:', error.message);
+      }
+    } else if (error instanceof Error) {
+      console.error('❌ [FALLBACK] Error message:', error.message);
+    } else {
+      console.error('❌ [FALLBACK] Unknown error:', error);
+    }
   }
 }
 
