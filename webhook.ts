@@ -8,14 +8,23 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const BOLT_WEBHOOK_ENDPOINT = process.env.BOLT_WEBHOOK_ENDPOINT;
 
 // Middleware
 app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 
-// Standard fallback message for when Edge Function forwarding fails
-const FALLBACK_MESSAGE = "Thank you for your message regarding customer service, your request has been received and will be processed by our team, we will get back to you shortly.";
+// Environment variables
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'your_verification_token_here';
+const BOLT_WEBHOOK_ENDPOINT = process.env.BOLT_WEBHOOK_ENDPOINT || 'https://your-bolt-app.com';
+
+// Logging utility
+function logInfo(message: string, data?: any) {
+  console.log(`[WEBHOOK] ${message}`, data ? JSON.stringify(data, null, 2) : '');
+}
+
+function logError(message: string, error?: any) {
+  console.error(`[WEBHOOK] ERROR: ${message}`, error);
+}
 
 // Webhook verification endpoint
 app.get('/webhook', (req, res) => {
@@ -23,16 +32,18 @@ app.get('/webhook', (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
+  logInfo('Webhook verification request received', { mode, token });
+
   if (mode && token) {
     if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-      console.log('✅ [WEBHOOK] Webhook verified successfully');
+      logInfo('Webhook verified successfully');
       res.status(200).send(challenge);
     } else {
-      console.error('❌ [WEBHOOK] Webhook verification failed - invalid token');
+      logError('Webhook verification failed - invalid token');
       res.sendStatus(403);
     }
   } else {
-    console.error('❌ [WEBHOOK] Webhook verification failed - missing parameters');
+    logError('Webhook verification failed - missing parameters');
     res.sendStatus(400);
   }
 });
@@ -40,208 +51,262 @@ app.get('/webhook', (req, res) => {
 // Webhook message handler
 app.post('/webhook', async (req, res) => {
   try {
+    logInfo('Webhook POST request received');
+    
     const body = req.body;
+    
+    if (!body.entry || !Array.isArray(body.entry)) {
+      logError('Invalid webhook payload - missing entry array');
+      return res.sendStatus(400);
+    }
 
-    // Handle status updates (delivery receipts, read receipts, etc.)
-    if (body.entry?.[0]?.changes?.[0]?.value?.statuses) {
-      console.log('📊 [WEBHOOK] Received status update');
-      const statuses = body.entry[0].changes[0].value.statuses;
-      
-      // Forward status updates to Edge Function status handler
-      try {
-        for (const status of statuses) {
-          await axios.post(`${BOLT_WEBHOOK_ENDPOINT}/functions/v1/status-handler`, {
-            messageId: status.id,
-            status: status.status,
-            timestamp: status.timestamp,
-            recipientId: status.recipient_id
-          });
+    // Process each entry
+    for (const entry of body.entry) {
+      if (entry.changes) {
+        for (const change of entry.changes) {
+          if (change.field === 'messages') {
+            await processMessages(change.value);
+          } else if (change.field === 'message_status_updates') {
+            await processStatusUpdates(change.value);
+          }
         }
-        console.log('✅ [WEBHOOK] Status updates forwarded successfully');
-      } catch (statusError) {
-        console.error('❌ [WEBHOOK] Error forwarding status updates:', statusError.message);
       }
-      
-      res.sendStatus(200);
-      return;
     }
 
-    // Handle incoming messages
-    if (body.entry?.[0]?.changes?.[0]?.value?.messages) {
-      const messages = body.entry[0].changes[0].value.messages;
-      const contacts = body.entry[0].changes[0].value.contacts || [];
-      
-      for (const message of messages) {
-        await processIncomingMessage(message, contacts);
-      }
-      
-      res.sendStatus(200);
-      return;
-    }
-
-    // If no messages or statuses, just acknowledge
-    console.log('ℹ️ [WEBHOOK] Received webhook with no messages or statuses');
     res.sendStatus(200);
-
   } catch (error) {
-    console.error('❌ [WEBHOOK] Error processing webhook:', error);
+    // Fix TypeScript error: Type assertion for error handling
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    
+    logError('Webhook processing failed', {
+      message: errorMessage,
+      stack: errorStack
+    });
     res.sendStatus(500);
   }
 });
 
-// Process individual incoming message
-async function processIncomingMessage(message: any, contacts: any[]) {
+// Process incoming messages
+async function processMessages(messageData: any) {
   try {
-    // Extract message details
-    const phoneNumber = message.from;
-    const messageId = message.id;
-    const timestamp = message.timestamp;
-    
-    // Only process text messages for now
-    if (!message.text?.body) {
-      console.log('ℹ️ [WEBHOOK] Skipping non-text message:', messageId);
+    logInfo('Processing messages', { messageCount: messageData.messages?.length || 0 });
+
+    if (!messageData.messages || !Array.isArray(messageData.messages)) {
+      logInfo('No messages to process');
       return;
     }
 
-    const messageText = message.text.body;
-    
-    console.log('📨 [WEBHOOK] Processing incoming message:', {
-      from: phoneNumber,
-      messageId: messageId,
-      textLength: messageText.length
+    for (const message of messageData.messages) {
+      await processMessage(message, messageData.metadata?.phone_number_id);
+    }
+  } catch (error) {
+    // Fix TypeScript error: Type assertion for error handling
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    logError('Error processing messages', { error: errorMessage });
+  }
+}
+
+// Process status updates
+async function processStatusUpdates(statusData: any) {
+  try {
+    logInfo('Processing status updates', { statusCount: statusData.statuses?.length || 0 });
+
+    if (!statusData.statuses || !Array.isArray(statusData.statuses)) {
+      logInfo('No status updates to process');
+      return;
+    }
+
+    for (const status of statusData.statuses) {
+      try {
+        // Forward status update to Bolt app
+        await axios.post(`${BOLT_WEBHOOK_ENDPOINT}/api/webhook/status`, {
+          messageId: status.id,
+          status: status.status,
+          timestamp: status.timestamp,
+          recipientId: status.recipient_id
+        }, {
+          timeout: 10000,
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'WhatsApp-Webhook/1.0'
+          }
+        });
+
+        logInfo('Status update forwarded successfully', {
+          messageId: status.id,
+          status: status.status
+        });
+      } catch (statusError) {
+        // Fix TypeScript error: Type assertion for status error handling
+        const errorMessage = statusError instanceof Error ? statusError.message : 'Unknown status error';
+        const isAxiosError = axios.isAxiosError(statusError);
+        const statusCode = isAxiosError ? statusError.response?.status : undefined;
+        const responseData = isAxiosError ? statusError.response?.data : undefined;
+        
+        logError('Failed to forward status update', {
+          messageId: status.id,
+          error: errorMessage,
+          statusCode,
+          responseData
+        });
+      }
+    }
+  } catch (error) {
+    // Fix TypeScript error: Type assertion for error handling
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    logError('Error processing status updates', { error: errorMessage });
+  }
+}
+
+// Process individual message
+async function processMessage(message: any, phoneNumberId: string) {
+  try {
+    logInfo('Processing individual message', {
+      messageId: message.id,
+      from: message.from,
+      type: message.type
     });
 
     // Determine chatbot type based on message content
-    const chatbotType = determineChatbotType(messageText);
+    const chatbotType = determineChatbotType(message);
     
-    // Prepare payload for Edge Function with REQUIRED source field
-    const edgeFunctionPayload = {
-      phoneNumber: phoneNumber,
-      text: messageText,
-      messageId: messageId,
-      timestamp: timestamp,
+    // Prepare message data for forwarding
+    const messagePayload = {
+      messageId: message.id,
+      from: message.from,
+      timestamp: message.timestamp,
+      type: message.type,
+      phoneNumberId: phoneNumberId,
       chatbotType: chatbotType,
-      source: "whatsapp"  // ✅ CRITICAL: Always add source field for WhatsApp messages
+      content: extractMessageContent(message)
     };
 
-    // Validate that source field is present before forwarding
-    if (!edgeFunctionPayload.source || edgeFunctionPayload.source !== "whatsapp") {
-      console.error('❌ [WEBHOOK] CRITICAL: Source field validation failed, adding whatsapp source');
-      edgeFunctionPayload.source = "whatsapp";
-    }
-
-    // Log the final payload being sent to Edge Function
-    console.log('📤 [WEBHOOK] Forwarding to Edge Function with payload:', {
-      phoneNumber: edgeFunctionPayload.phoneNumber,
-      messageId: edgeFunctionPayload.messageId,
-      chatbotType: edgeFunctionPayload.chatbotType,
-      source: edgeFunctionPayload.source,  // ✅ Confirm source is included
-      textLength: edgeFunctionPayload.text.length
-    });
-
-    // Forward to Edge Function with timeout and retry logic
-    let edgeFunctionSuccess = false;
-    let edgeFunctionResponse = null;
+    // Forward to appropriate Bolt app endpoint
+    const endpoint = `${BOLT_WEBHOOK_ENDPOINT}/api/webhook/${chatbotType}`;
     
     try {
-      const response = await axios.post(
-        `${BOLT_WEBHOOK_ENDPOINT}/functions/v1/api-chatbot`,
-        edgeFunctionPayload,
-        {
-          timeout: 30000, // 30 second timeout
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${process.env.SUPABASE_ANON_KEY || ''}`
-          }
+      const response = await axios.post(endpoint, messagePayload, {
+        timeout: 30000,
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'WhatsApp-Webhook/1.0'
         }
-      );
-
-      edgeFunctionResponse = response.data;
-      
-      if (response.status === 200 && edgeFunctionResponse?.success) {
-        console.log('✅ [WEBHOOK] Edge Function processed message successfully');
-        edgeFunctionSuccess = true;
-      } else {
-        console.error('❌ [WEBHOOK] Edge Function returned error:', {
-          status: response.status,
-          responseData: edgeFunctionResponse
-        });
-        throw new Error(`Edge Function error: ${JSON.stringify(edgeFunctionResponse)}`);
-      }
-
-    } catch (forwardError) {
-      console.error('❌ [WEBHOOK] Failed to forward to Edge Function:', {
-        error: forwardError.message,
-        phoneNumber: phoneNumber,
-        messageId: messageId,
-        payload: edgeFunctionPayload
       });
-      
-      // Log Edge Function response details if available
-      if (forwardError.response) {
-        console.error('❌ [WEBHOOK] Edge Function response details:', {
-          status: forwardError.response.status,
-          statusText: forwardError.response.statusText,
-          data: forwardError.response.data
-        });
-      }
-      
-      edgeFunctionSuccess = false;
-    }
 
-    // If Edge Function forwarding failed, send fallback message directly
-    if (!edgeFunctionSuccess) {
-      console.log('🔄 [WEBHOOK] Edge Function failed, sending fallback message');
-      await sendFallbackMessage(phoneNumber, messageId);
-    }
+      logInfo('Message forwarded successfully', {
+        messageId: message.id,
+        chatbotType,
+        endpoint,
+        responseStatus: response.status
+      });
+    } catch (forwardError) {
+      // Fix TypeScript error: Type assertion for forward error handling
+      const errorMessage = forwardError instanceof Error ? forwardError.message : 'Unknown forward error';
+      const isAxiosError = axios.isAxiosError(forwardError);
+      const statusCode = isAxiosError ? forwardError.response?.status : undefined;
+      const responseData = isAxiosError ? forwardError.response?.data : undefined;
+      const requestConfig = isAxiosError ? {
+        url: forwardError.config?.url,
+        method: forwardError.config?.method,
+        timeout: forwardError.config?.timeout
+      } : undefined;
+      
+      logError('Failed to forward message to Bolt app', {
+        messageId: message.id,
+        endpoint,
+        error: errorMessage,
+        statusCode,
+        responseData,
+        requestConfig
+      });
 
+      // Try fallback processing
+      await processFallbackMessage(message, chatbotType);
+    }
   } catch (error) {
-    console.error('❌ [WEBHOOK] Error processing individual message:', error);
-    
-    // Send fallback message even if processing fails
-    try {
-      await sendFallbackMessage(message.from, message.id);
-    } catch (fallbackError) {
-      console.error('❌ [WEBHOOK] Failed to send fallback message:', fallbackError);
-    }
+    // Fix TypeScript error: Type assertion for error handling
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    logError('Error processing individual message', {
+      messageId: message.id,
+      error: errorMessage
+    });
   }
 }
 
 // Determine chatbot type based on message content
-function determineChatbotType(messageText: string): string {
-  const lowerText = messageText.toLowerCase();
-  
+function determineChatbotType(message: any): string {
+  const content = extractMessageContent(message);
+  const lowerContent = content.toLowerCase();
+
   // Quiz keywords
   const quizKeywords = ['quiz', 'game', 'test', 'play', 'challenge', 'jeu', 'défi'];
-  if (quizKeywords.some(keyword => lowerText.includes(keyword))) {
+  if (quizKeywords.some(keyword => lowerContent.includes(keyword))) {
     return 'quiz';
   }
-  
+
+  // Education keywords
+  const educationKeywords = ['learn', 'study', 'homework', 'apprendre', 'étudier', 'devoirs'];
+  if (educationKeywords.some(keyword => lowerContent.includes(keyword))) {
+    return 'education';
+  }
+
   // Default to customer service
-  return 'client';
+  return 'customer-service';
 }
 
-// Send fallback message when Edge Function fails
-async function sendFallbackMessage(phoneNumber: string, originalMessageId: string) {
+// Extract message content based on message type
+function extractMessageContent(message: any): string {
+  switch (message.type) {
+    case 'text':
+      return message.text?.body || '';
+    case 'image':
+      return message.image?.caption || '[Image]';
+    case 'video':
+      return message.video?.caption || '[Video]';
+    case 'document':
+      return message.document?.caption || '[Document]';
+    case 'audio':
+      return '[Audio]';
+    default:
+      return '[Unknown message type]';
+  }
+}
+
+// Fallback message processing
+async function processFallbackMessage(message: any, chatbotType: string) {
   try {
-    console.log('📤 [WEBHOOK] Sending fallback message to:', phoneNumber);
+    logInfo('Processing fallback message', {
+      messageId: message.id,
+      chatbotType
+    });
+
+    // Simple fallback response based on chatbot type
+    let fallbackResponse = '';
     
-    // This would typically send via WhatsApp API
-    // For now, we'll log that the fallback message should be sent
-    console.log('💬 [WEBHOOK] Fallback message content:', FALLBACK_MESSAGE);
-    
-    // In a real implementation, you would:
-    // 1. Get WhatsApp API credentials
-    // 2. Send the fallback message via WhatsApp API
-    // 3. Log the result
-    
-    // Placeholder for actual WhatsApp API call
-    // const whatsappResponse = await sendWhatsAppMessage(phoneNumber, FALLBACK_MESSAGE);
-    
-    console.log('✅ [WEBHOOK] Fallback message sent successfully');
-    
+    switch (chatbotType) {
+      case 'quiz':
+        fallbackResponse = 'Bienvenue au quiz! Votre message a été reçu et sera traité bientôt.';
+        break;
+      case 'education':
+        fallbackResponse = 'Bonjour! Votre question éducative a été reçue et sera traitée par notre équipe.';
+        break;
+      default:
+        fallbackResponse = 'Merci pour votre message. Notre équipe vous répondra dans les plus brefs délais.';
+    }
+
+    // Log the fallback response (in a real implementation, you might send this back via WhatsApp API)
+    logInfo('Fallback response generated', {
+      messageId: message.id,
+      response: fallbackResponse
+    });
   } catch (error) {
-    console.error('❌ [WEBHOOK] Error sending fallback message:', error);
+    // Fix TypeScript error: Type assertion for error handling
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    logError('Error in fallback message processing', {
+      messageId: message.id,
+      error: errorMessage
+    });
   }
 }
 
@@ -250,39 +315,58 @@ app.get('/templates/:businessAccountId', async (req, res) => {
   try {
     const { businessAccountId } = req.params;
     const authHeader = req.headers.authorization;
-    
+
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({ error: 'Missing or invalid authorization header' });
     }
-    
+
     const accessToken = authHeader.substring(7);
-    
+
+    logInfo('Fetching templates', { businessAccountId });
+
     // Fetch templates from Meta API
     const response = await axios.get(
       `https://graph.facebook.com/v19.0/${businessAccountId}/message_templates`,
       {
         headers: {
-          'Authorization': `Bearer ${accessToken}`
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
         },
-        timeout: 10000
+        timeout: 15000
       }
     );
-    
+
+    logInfo('Templates fetched successfully', {
+      businessAccountId,
+      templateCount: response.data.data?.length || 0
+    });
+
     res.json(response.data);
-    
   } catch (error) {
-    console.error('Error fetching templates:', error);
-    res.status(500).json({ 
+    // Fix TypeScript error: Type assertion for error handling
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    const isAxiosError = axios.isAxiosError(error);
+    const statusCode = isAxiosError ? error.response?.status : 500;
+    const responseData = isAxiosError ? error.response?.data : undefined;
+    
+    logError('Error fetching templates', {
+      businessAccountId: req.params.businessAccountId,
+      error: errorMessage,
+      statusCode,
+      responseData
+    });
+
+    res.status(statusCode).json({
       error: 'Failed to fetch templates',
-      details: error.message 
+      details: errorMessage
     });
   }
 });
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
+  res.json({
+    status: 'healthy',
     timestamp: new Date().toISOString(),
     version: '1.0.0'
   });
@@ -290,12 +374,21 @@ app.get('/health', (req, res) => {
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 [WEBHOOK] Server running on port ${PORT}`);
-  console.log(`📋 [WEBHOOK] Environment check:`, {
+  logInfo(`Webhook server running on port ${PORT}`);
+  logInfo('Environment configuration', {
     hasVerifyToken: !!VERIFY_TOKEN,
     hasBoltEndpoint: !!BOLT_WEBHOOK_ENDPOINT,
-    boltEndpoint: BOLT_WEBHOOK_ENDPOINT
+    port: PORT
   });
 });
 
-export default app;
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  logInfo('SIGTERM received, shutting down gracefully');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  logInfo('SIGINT received, shutting down gracefully');
+  process.exit(0);
+});
