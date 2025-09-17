@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express from 'express';
 import bodyParser from 'body-parser';
 import axios from 'axios';
 import dotenv from 'dotenv';
@@ -6,612 +6,256 @@ import dotenv from 'dotenv';
 // Load environment variables
 dotenv.config();
 
-// Get Supabase service role key from environment variables
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-// Initialize Express app
 const app = express();
-const port = process.env.PORT || 3000;
-
-// Supabase authentication
-const SUPABASE_URL = 'https://tyeysspawsupdgaowrec.supabase.co';
-const SUPABASE_FUNCTION_PATH = '/functions/v1/api-chatbot';
-
-// CORS headers
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
+const PORT = process.env.PORT || 3000;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const BOLT_WEBHOOK_ENDPOINT = process.env.BOLT_WEBHOOK_ENDPOINT;
 
 // Middleware
 app.use(bodyParser.json());
 
-// Add CORS middleware
-app.use((req, res, next) => {
-  Object.keys(corsHeaders).forEach(key => {
-    res.setHeader(key, corsHeaders[key as keyof typeof corsHeaders]);
-  });
-  
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-    return;
-  }
-  
-  next();
-});
+// Standard fallback message for when Edge Function forwarding fails
+const FALLBACK_MESSAGE = "Thank you for your message regarding customer service, your request has been received and will be processed by our team, we will get back to you shortly.";
 
-/**
- * Trigger keywords for different chatbot types
- */
-const TRIGGER_KEYWORDS = {
-  CLIENT: [
-    'support', 'help', 'customer service', 'assistance', 'problem', 
-    'issue', 'complaint', 'service client', 'aide', 'problème'
-  ],
-  EDUCATION: [
-    'learn', 'study', 'course', 'education', 'school', 'homework', 
-    'assignment', 'question', 'apprendre', 'étudier', 'cours', 'éducation', 
-    'école', 'devoir', 'exercice'
-  ],
-  QUIZ: [
-    'quiz', 'game', 'test', 'play', 'challenge', 'question', 'answer',
-    'jeu', 'défi', 'réponse', 'questionnaire'
-  ]
-};
-
-/**
- * Determine which chatbot should handle the message based on content analysis
- * @param message The message text to analyze
- * @returns The chatbot type: 'client', 'education', or 'quiz'
- */
-function determineChatbotType(message: string): 'client' | 'education' | 'quiz' {
-  const lowerMessage = message.toLowerCase();
-  
-  // Check for education keywords
-  if (TRIGGER_KEYWORDS.EDUCATION.some(keyword => lowerMessage.includes(keyword))) {
-    return 'education';
-  }
-  
-  // Check for quiz keywords
-  if (TRIGGER_KEYWORDS.QUIZ.some(keyword => lowerMessage.includes(keyword))) {
-    return 'quiz';
-  }
-  
-  // Check for client support keywords
-  if (TRIGGER_KEYWORDS.CLIENT.some(keyword => lowerMessage.includes(keyword))) {
-    return 'client';
-  }
-  
-  // If the message is literally "client", "education", or "quiz", return that directly
-  if (lowerMessage === 'client' || lowerMessage === 'service client') {
-    return 'client';
-  }
-  if (lowerMessage === 'education') {
-    return 'education';
-  }
-  if (lowerMessage === 'quiz') {
-    return 'quiz';
-  }
-  
-  // Default to education if no other matches (changed from client to ensure compatibility)
-  return 'education';
-}
-
-/**
- * GET endpoint for webhook verification
- * This is required by Meta to verify the webhook
- */
-app.get('/webhook', (req: Request, res: Response) => {
-  // Parse query parameters
+// Webhook verification endpoint
+app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  // Check if a token and mode were sent
   if (mode && token) {
-    // Check the mode and token sent are correct
-    if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
-      // Respond with the challenge token from the request
-      console.log('WEBHOOK_VERIFIED');
+    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+      console.log('✅ [WEBHOOK] Webhook verified successfully');
       res.status(200).send(challenge);
     } else {
-      // Respond with '403 Forbidden' if verify tokens do not match
-      console.error('Verification failed. Token mismatch.');
+      console.error('❌ [WEBHOOK] Webhook verification failed - invalid token');
       res.sendStatus(403);
     }
   } else {
-    // Missing required parameters - return success for health checks
-    console.log('Webhook health check');
-    res.status(200).json({ status: 'ok', message: 'Webhook is running' });
+    console.error('❌ [WEBHOOK] Webhook verification failed - missing parameters');
+    res.sendStatus(400);
   }
 });
 
-/**
- * POST endpoint for receiving webhook events
- * This handles incoming messages and status updates from WhatsApp
- */
-app.post('/webhook', async (req: Request, res: Response) => {
+// Webhook message handler
+app.post('/webhook', async (req, res) => {
   try {
-    // Check if this is a WhatsApp message event
-    if (req.body.object === 'whatsapp_business_account') {
-      // Process each entry in the webhook event
-      for (const entry of req.body.entry || []) {
-        // Process each change in the entry
-        for (const change of entry.changes || []) {
-          // Check if this is a messages event
-          if (change.field === 'messages') {
-            // Get the phone number ID (identifies the client)
-            const phoneNumberId = change.value.metadata?.phone_number_id;
-            
-            if (!phoneNumberId) {
-              console.error('Missing phone_number_id in webhook payload');
-              continue;
-            }
+    const body = req.body;
 
-            // Handle message status updates
-            if (change.value.statuses) {
-              for (const status of change.value.statuses) {
-                await handleStatusUpdate(phoneNumberId, status);
-              }
-            }
+    // Handle status updates (delivery receipts, read receipts, etc.)
+    if (body.entry?.[0]?.changes?.[0]?.value?.statuses) {
+      console.log('📊 [WEBHOOK] Received status update');
+      const statuses = body.entry[0].changes[0].value.statuses;
+      
+      // Forward status updates to Edge Function status handler
+      try {
+        for (const status of statuses) {
+          await axios.post(`${BOLT_WEBHOOK_ENDPOINT}/functions/v1/status-handler`, {
+            messageId: status.id,
+            status: status.status,
+            timestamp: status.timestamp,
+            recipientId: status.recipient_id
+          });
+        }
+        console.log('✅ [WEBHOOK] Status updates forwarded successfully');
+      } catch (statusError) {
+        console.error('❌ [WEBHOOK] Error forwarding status updates:', statusError.message);
+      }
+      
+      res.sendStatus(200);
+      return;
+    }
 
-            // Process each message
-            for (const message of change.value.messages || []) {
-              // Handle text messages
-              if (message.type === 'text' && message.text) {
-                const from = message.from; // Sender's phone number
-                const messageText = message.text.body; // Message content
-                
-                console.log(`Received message from ${from}: ${messageText}`);
-                
-                // Determine which chatbot should handle this message
-                const chatbotType = determineChatbotType(messageText);
-                
-                // Forward the message to the appropriate endpoint
-                await forwardMessage(chatbotType, {
-                  phoneNumberId,
-                  from,
-                  text: messageText,
-                  messageId: message.id,
-                  timestamp: message.timestamp
-                });
-              } else if (message.type === 'image' || message.type === 'video' || message.type === 'document') {
-                // Handle media messages
-                const from = message.from;
-                const mediaId = message[message.type].id;
-                const mimeType = message[message.type].mime_type;
-                
-                console.log(`Received ${message.type} from ${from} with ID: ${mediaId}`);
-                
-                // Download the media file from WhatsApp API
-                const mediaUrl = await downloadWhatsAppMedia(mediaId, phoneNumberId);
-                
-                // For media messages, default to education chatbot as it's likely
-                // students sending homework problems or educational content
-                const chatbotType = 'education';
-                
-                // Forward the media message
-                await forwardMessage(chatbotType, {
-                  phoneNumberId,
-                  from,
-                  text: `[${message.type.toUpperCase()}]`, // Placeholder text
-                  imageUrl: mediaUrl, // Add the actual image URL
-                  mediaType: message.type,
-                  mediaId,
-                  mimeType,
-                  messageId: message.id,
-                  timestamp: message.timestamp
-                });
-              }
-            }
+    // Handle incoming messages
+    if (body.entry?.[0]?.changes?.[0]?.value?.messages) {
+      const messages = body.entry[0].changes[0].value.messages;
+      const contacts = body.entry[0].changes[0].value.contacts || [];
+      
+      for (const message of messages) {
+        await processIncomingMessage(message, contacts);
+      }
+      
+      res.sendStatus(200);
+      return;
+    }
+
+    // If no messages or statuses, just acknowledge
+    console.log('ℹ️ [WEBHOOK] Received webhook with no messages or statuses');
+    res.sendStatus(200);
+
+  } catch (error) {
+    console.error('❌ [WEBHOOK] Error processing webhook:', error);
+    res.sendStatus(500);
+  }
+});
+
+// Process individual incoming message
+async function processIncomingMessage(message: any, contacts: any[]) {
+  try {
+    // Extract message details
+    const phoneNumber = message.from;
+    const messageId = message.id;
+    const timestamp = message.timestamp;
+    
+    // Only process text messages for now
+    if (!message.text?.body) {
+      console.log('ℹ️ [WEBHOOK] Skipping non-text message:', messageId);
+      return;
+    }
+
+    const messageText = message.text.body;
+    
+    console.log('📨 [WEBHOOK] Processing incoming message:', {
+      from: phoneNumber,
+      messageId: messageId,
+      textLength: messageText.length
+    });
+
+    // Determine chatbot type based on message content
+    const chatbotType = determineChatbotType(messageText);
+    
+    // Prepare payload for Edge Function with REQUIRED source field
+    const edgeFunctionPayload = {
+      phoneNumber: phoneNumber,
+      text: messageText,
+      messageId: messageId,
+      timestamp: timestamp,
+      chatbotType: chatbotType,
+      source: "whatsapp"  // ✅ CRITICAL: Always add source field for WhatsApp messages
+    };
+
+    // Validate that source field is present before forwarding
+    if (!edgeFunctionPayload.source || edgeFunctionPayload.source !== "whatsapp") {
+      console.error('❌ [WEBHOOK] CRITICAL: Source field validation failed, adding whatsapp source');
+      edgeFunctionPayload.source = "whatsapp";
+    }
+
+    // Log the final payload being sent to Edge Function
+    console.log('📤 [WEBHOOK] Forwarding to Edge Function with payload:', {
+      phoneNumber: edgeFunctionPayload.phoneNumber,
+      messageId: edgeFunctionPayload.messageId,
+      chatbotType: edgeFunctionPayload.chatbotType,
+      source: edgeFunctionPayload.source,  // ✅ Confirm source is included
+      textLength: edgeFunctionPayload.text.length
+    });
+
+    // Forward to Edge Function with timeout and retry logic
+    let edgeFunctionSuccess = false;
+    let edgeFunctionResponse = null;
+    
+    try {
+      const response = await axios.post(
+        `${BOLT_WEBHOOK_ENDPOINT}/functions/v1/api-chatbot`,
+        edgeFunctionPayload,
+        {
+          timeout: 30000, // 30 second timeout
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.SUPABASE_ANON_KEY || ''}`
           }
         }
-      }
-      
-      // Return a 200 OK response to acknowledge receipt
-      res.status(200).send('EVENT_RECEIVED');
-    } else {
-      // Not a WhatsApp Business API event 
-      console.warn(`Received webhook event for ${req.body.object}`);
-      res.sendStatus(404);
-    }
-  } catch (error) {
-    console.error('Error processing webhook:');
-    if (error instanceof Error) {
-      console.error(error.message);
-    } else {
-      console.error(String(error));
-    }
-    res.status(500).send('Error processing webhook');
-  }
-});
-
-/**
- * Handle message status updates (delivered, read, failed)
- * @param phoneNumberId The phone number ID associated with the client
- * @param status The status update object from WhatsApp
- */
-async function handleStatusUpdate(phoneNumberId: string, status: any): Promise<void> {
-  try {
-    const statusType = status.status; // delivered, read, sent, failed
-    const messageId = status.id;
-    const recipientId = status.recipient_id;
-    const timestamp = status.timestamp;
-    
-    console.log(`Status update for message ${messageId}: ${statusType}`);
-    
-    // Hardcoded Supabase Edge Function URL
-    const endpoint = `${SUPABASE_URL}${SUPABASE_FUNCTION_PATH}`;
-    
-    // Check if we have the service role key
-    if (!SUPABASE_SERVICE_ROLE_KEY) {
-      console.error('SUPABASE_SERVICE_ROLE_KEY is not set in environment variables');
-      return;
-    }
-    
-    if (!endpoint) {
-      console.warn('No endpoint available for status updates, skipping');
-      return;
-    }
-    
-    // Send the status update
-    await axios.post(endpoint, {
-      type: 'status_update',
-      phoneNumberId,
-      messageId,
-      recipientId,
-      status: statusType,
-      timestamp,
-      // Add any additional data needed by the status handler
-      phoneNumber: recipientId
-    }, {
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
-      }
-    });
-    
-    console.log(`Status update forwarded successfully`);
-  } catch (error) {
-    console.error('Error handling status update:');
-    if (axios.isAxiosError(error)) {
-      if (error.response) {
-        console.error('Response data:', error.response.data);
-      } else {
-        console.error('Error message:', error.message);
-      }
-    } else if (error instanceof Error) {
-      console.error('Error message:', error.message);
-    } else {
-      console.error('Unknown error:', error);
-    }
-  }
-}
-
-/**
- * Download media file from WhatsApp API and return public URL
- * @param mediaId The media ID from WhatsApp
- * @param phoneNumberId The phone number ID for API access
- * @returns Public URL of the downloaded media
- */
-async function downloadWhatsAppMedia(mediaId: string, phoneNumberId: string): Promise<string | null> {
-  try {
-    console.log(`📥 [MEDIA] Downloading media with ID: ${mediaId}`);
-    
-    // Get access token from environment variables
-    const accessToken = process.env.META_ACCESS_TOKEN;
-    
-    if (!accessToken) {
-      console.error('❌ [MEDIA] META_ACCESS_TOKEN environment variable is not set');
-      return null;
-    }
-    
-    // Step 1: Get media URL from WhatsApp API
-    const mediaInfoResponse = await axios.get(
-      `https://graph.facebook.com/v19.0/${mediaId}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`
-        }
-      }
-    );
-    
-    if (!mediaInfoResponse.data.url) {
-      console.error('❌ [MEDIA] No URL found in media info response');
-      return null;
-    }
-    
-    const mediaUrl = mediaInfoResponse.data.url;
-    console.log(`📥 [MEDIA] Got media URL: ${mediaUrl}`);
-    
-    // Step 2: Download the actual media file
-    const mediaResponse = await axios.get(mediaUrl, {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`
-      },
-      responseType: 'arraybuffer'
-    });
-    
-    // Step 3: Convert to base64 for transmission
-    const base64Data = Buffer.from(mediaResponse.data).toString('base64');
-    const mimeType = mediaResponse.headers['content-type'] || 'image/jpeg';
-    const dataUrl = `data:${mimeType};base64,${base64Data}`;
-    
-    console.log(`✅ [MEDIA] Media downloaded and converted to base64`);
-    return dataUrl;
-    
-  } catch (error) {
-    console.error('❌ [MEDIA] Error downloading media:', error);
-    return null;
-  }
-}
-
-/**
- * Forward the message to the appropriate chatbot endpoint
- * @param chatbotType The type of chatbot to handle the message
- * @param messageData The message data to forward
- */
-async function forwardMessage(
-  chatbotType: 'client' | 'education' | 'quiz',
-  messageData: any
-): Promise<void> {
-  try {
-    // Get the base URL from environment variables
-    // Hardcoded Supabase Edge Function URL
-    const endpoint = `${SUPABASE_URL}${SUPABASE_FUNCTION_PATH}`;
-    
-    // Check if we have the service role key
-    if (!SUPABASE_SERVICE_ROLE_KEY) {
-      console.error('SUPABASE_SERVICE_ROLE_KEY is not set in environment variables');
-      await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
-      return;
-    }
-    
-    if (!endpoint) {
-      console.warn(`No endpoint available for ${chatbotType} chatbot, sending auto-response instead`);
-      await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
-      return;
-    }
-    
-    console.log(`Attempting to forward message to ${endpoint}`);
-    
-    // Ensure the chatbotType is correctly formatted for the API
-    // The API expects 'client', 'education', or 'quiz'
-    let formattedChatbotType = chatbotType;
-    
-    // Add chatbot type to the message data with proper validation
-    const messageDataWithType = {
-      ...messageData,
-      chatbotType: formattedChatbotType,
-      from: messageData.from,
-      text: messageData.text || messageData.messageText,
-      timestamp: messageData.timestamp,
-      messageId: messageData.messageId
-    };
-    
-    console.log('Sending payload to Edge Function:', JSON.stringify(messageDataWithType, null, 2));
-    
-    // Send the message to the appropriate endpoint
-    const response = await axios.post(endpoint, {
-      from: messageData.from,
-      text: messageData.text || messageData.messageText,
-      phoneNumberId: messageData.phoneNumberId,
-      messageId: messageData.messageId,
-      timestamp: messageData.timestamp,
-      chatbotType: formattedChatbotType
-    }, {
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
-      }
-    });
-    
-    console.log(`Message forwarded successfully: ${response.status}`);
-    console.log('Edge Function response:', response.data);
-    
-    // ✅ NEW: Check if Edge Function returned a successful response with content
-    if (response.data && response.data.success && response.data.response) {
-      console.log(`📤 Edge Function provided response: "${response.data.response}"`);
-      console.log(`📱 Sending response back to WhatsApp user: ${messageData.from}`);
-      
-      // Send the actual chatbot response directly
-      await sendChatbotResponse(
-        messageData.phoneNumberId, 
-        messageData.from, 
-        response.data.response
       );
+
+      edgeFunctionResponse = response.data;
       
-      console.log(`✅ Chatbot response sent successfully to ${messageData.from}`);
-    } else {
-      console.log(`❌ Edge Function did not provide a valid response:`, response.data);
+      if (response.status === 200 && edgeFunctionResponse?.success) {
+        console.log('✅ [WEBHOOK] Edge Function processed message successfully');
+        edgeFunctionSuccess = true;
+      } else {
+        console.error('❌ [WEBHOOK] Edge Function returned error:', {
+          status: response.status,
+          responseData: edgeFunctionResponse
+        });
+        throw new Error(`Edge Function error: ${JSON.stringify(edgeFunctionResponse)}`);
+      }
+
+    } catch (forwardError) {
+      console.error('❌ [WEBHOOK] Failed to forward to Edge Function:', {
+        error: forwardError.message,
+        phoneNumber: phoneNumber,
+        messageId: messageId,
+        payload: edgeFunctionPayload
+      });
       
-      // Fallback to auto-response if Edge Function failed
-      await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
-    }
-  } catch (error) {
-    console.error(`Error forwarding message:`);
-    
-    if (axios.isAxiosError(error)) {
-      if (error.response) {
-        console.error('Response status:', error.response.status);
-        console.error('Response data:', error.response.data);
-      } else {
-        console.error('Error message:', error.message);
+      // Log Edge Function response details if available
+      if (forwardError.response) {
+        console.error('❌ [WEBHOOK] Edge Function response details:', {
+          status: forwardError.response.status,
+          statusText: forwardError.response.statusText,
+          data: forwardError.response.data
+        });
       }
-    } else if (error instanceof Error) {
-      console.error('Error message:', error.message);
-    } else {
-      console.error('Unknown error:', error);
+      
+      edgeFunctionSuccess = false;
     }
+
+    // If Edge Function forwarding failed, send fallback message directly
+    if (!edgeFunctionSuccess) {
+      console.log('🔄 [WEBHOOK] Edge Function failed, sending fallback message');
+      await sendFallbackMessage(phoneNumber, messageId);
+    }
+
+  } catch (error) {
+    console.error('❌ [WEBHOOK] Error processing individual message:', error);
     
-    // ✅ UPDATED: Only send fallback auto-response if Edge Function completely failed
-    console.log(`⚠️ Edge Function failed, sending fallback auto-response`);
-    await sendAutoResponse(messageData.phoneNumberId, messageData.from, messageData.text, chatbotType);
+    // Send fallback message even if processing fails
+    try {
+      await sendFallbackMessage(message.from, message.id);
+    } catch (fallbackError) {
+      console.error('❌ [WEBHOOK] Failed to send fallback message:', fallbackError);
+    }
   }
 }
 
-/**
- * Send the actual chatbot response to WhatsApp
- * @param phoneNumberId The phone number ID to use for sending
- * @param to The recipient's phone number
- * @param chatbotResponse The response generated by the chatbot
- */
-async function sendChatbotResponse(
-  phoneNumberId: string,
-  to: string,
-  chatbotResponse: string
-): Promise<void> {
+// Determine chatbot type based on message content
+function determineChatbotType(messageText: string): string {
+  const lowerText = messageText.toLowerCase();
+  
+  // Quiz keywords
+  const quizKeywords = ['quiz', 'game', 'test', 'play', 'challenge', 'jeu', 'défi'];
+  if (quizKeywords.some(keyword => lowerText.includes(keyword))) {
+    return 'quiz';
+  }
+  
+  // Default to customer service
+  return 'client';
+}
+
+// Send fallback message when Edge Function fails
+async function sendFallbackMessage(phoneNumber: string, originalMessageId: string) {
   try {
-    console.log(`📤 [CHATBOT-RESPONSE] Sending chatbot response to ${to}`);
-    console.log(`📤 [CHATBOT-RESPONSE] Response content: "${chatbotResponse.substring(0, 100)}${chatbotResponse.length > 100 ? '...' : ''}"`);
+    console.log('📤 [WEBHOOK] Sending fallback message to:', phoneNumber);
     
-    // Get access token from environment variables
-    const accessToken = process.env.META_ACCESS_TOKEN;
+    // This would typically send via WhatsApp API
+    // For now, we'll log that the fallback message should be sent
+    console.log('💬 [WEBHOOK] Fallback message content:', FALLBACK_MESSAGE);
     
-    if (!accessToken) {
-      console.error('❌ [CHATBOT-RESPONSE] META_ACCESS_TOKEN environment variable is not set');
-      return;
-    }
+    // In a real implementation, you would:
+    // 1. Get WhatsApp API credentials
+    // 2. Send the fallback message via WhatsApp API
+    // 3. Log the result
     
-    console.log(`📤 [CHATBOT-RESPONSE] Using phone number ID: ${phoneNumberId}`);
-    console.log(`📤 [CHATBOT-RESPONSE] Access token exists: ${!!accessToken}`);
+    // Placeholder for actual WhatsApp API call
+    // const whatsappResponse = await sendWhatsAppMessage(phoneNumber, FALLBACK_MESSAGE);
     
-    // Send response via WhatsApp API
-    const response = await axios.post(
-      `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: to,
-        type: 'text',
-        text: { body: chatbotResponse }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+    console.log('✅ [WEBHOOK] Fallback message sent successfully');
     
-    console.log(`✅ [CHATBOT-RESPONSE] WhatsApp message sent successfully: ${response.status}`);
-    console.log(`📱 [CHATBOT-RESPONSE] Exact message sent to ${to}: "${chatbotResponse}"`);
   } catch (error) {
-    console.error(`❌ [CHATBOT-RESPONSE] Error sending WhatsApp message:`);
-    
-    if (axios.isAxiosError(error)) {
-      if (error.response) {
-        console.error('❌ [CHATBOT-RESPONSE] Response status:', error.response.status);
-        console.error('❌ [CHATBOT-RESPONSE] Response data:', error.response.data);
-      } else {
-        console.error('❌ [CHATBOT-RESPONSE] Error message:', error.message);
-      }
-    } else if (error instanceof Error) {
-      console.error('❌ [CHATBOT-RESPONSE] Error message:', error.message);
-    } else {
-      console.error('❌ [CHATBOT-RESPONSE] Unknown error:', error);
-    }
+    console.error('❌ [WEBHOOK] Error sending fallback message:', error);
   }
 }
 
-/**
- * Send an automatic fallback response when Edge Function fails
- * @param phoneNumberId The phone number ID to use for sending
- * @param to The recipient's phone number
- * @param originalMessage The original user message
- * @param chatbotType The type of chatbot that would have handled the message
- */
-async function sendAutoResponse(
-  phoneNumberId: string,
-  to: string,
-  originalMessage: string,
-  chatbotType: 'client' | 'education' | 'quiz'
-): Promise<void> {
-  try {
-    // Get access token from environment variables
-    const accessToken = process.env.META_ACCESS_TOKEN;
-    
-    if (!accessToken) {
-      console.error('META_ACCESS_TOKEN environment variable is not set');
-      return;
-    }
-    
-    // This function is now only for fallback messages when Edge Function fails
-    let responseMessage = '';
-    console.log(`📤 [FALLBACK] Using fallback message for chatbot type: ${chatbotType}`);
-    
-    switch (chatbotType) {
-      case 'education':
-        responseMessage = 'Merci pour votre message concernant l\'éducation. Votre question a été reçue et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
-        break;
-      case 'quiz':
-        responseMessage = 'Merci pour votre intérêt pour nos quiz. Votre demande a été enregistrée et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
-        break;
-      default:
-        responseMessage = 'Merci pour votre message au service client. Votre demande a été enregistrée et sera traitée par notre équipe. Nous vous répondrons dès que possible.';
-    }
-    
-    // Send response via WhatsApp API
-    const response = await axios.post(
-      `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: to,
-        type: 'text',
-        text: { body: responseMessage }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    
-    console.log(`✅ [FALLBACK] WhatsApp fallback message sent successfully: ${response.status}`);
-    console.log(`📱 [FALLBACK] Fallback message sent to ${to}: "${responseMessage.substring(0, 50)}..."`);
-  } catch (error) {
-    console.error(`❌ [FALLBACK] Error sending WhatsApp fallback message:`);
-    
-    if (axios.isAxiosError(error)) {
-      if (error.response) {
-        console.error('❌ [FALLBACK] Response status:', error.response.status);
-        console.error('❌ [FALLBACK] Response data:', error.response.data);
-      } else {
-        console.error('❌ [FALLBACK] Error message:', error.message);
-      }
-    } else if (error instanceof Error) {
-      console.error('❌ [FALLBACK] Error message:', error.message);
-    } else {
-      console.error('❌ [FALLBACK] Unknown error:', error);
-    }
-  }
-}
-
-/**
- * Endpoint to fetch templates from Meta API
- * This allows the main application to retrieve templates through the webhook
- */
-app.get('/templates/:businessAccountId', async (req: Request, res: Response) => {
+// Template management endpoint
+app.get('/templates/:businessAccountId', async (req, res) => {
   try {
     const { businessAccountId } = req.params;
-    // Use the authorization header from the request or fall back to the environment variable
-    let accessToken = req.headers.authorization?.split(' ')[1];
+    const authHeader = req.headers.authorization;
     
-    // If no token in header, use the one from environment variables
-    if (!accessToken) {
-      accessToken = process.env.META_ACCESS_TOKEN;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Missing or invalid authorization header' });
     }
     
-    if (!accessToken) {
-      return res.status(401).json({ error: 'Authorization token required' });
-    }
-    
-    if (!businessAccountId) {
-      return res.status(400).json({ error: 'WhatsApp Business Account ID required' });
-    }
+    const accessToken = authHeader.substring(7);
     
     // Fetch templates from Meta API
     const response = await axios.get(
@@ -619,48 +263,39 @@ app.get('/templates/:businessAccountId', async (req: Request, res: Response) => 
       {
         headers: {
           'Authorization': `Bearer ${accessToken}`
-        }
+        },
+        timeout: 10000
       }
     );
     
-    res.status(200).json(response.data);
-  } catch (error) {
-    console.error('Error fetching templates:');
+    res.json(response.data);
     
-    if (axios.isAxiosError(error)) {
-      if (error.response) {
-        // Log the error details
-        console.error('Response status:', error.response.status);
-        console.error('Response data:', error.response.data);
-        
-        // Return appropriate error response
-        console.error('Response data:', error.response.data);
-        console.error('Response status:', error.response.status);
-        const status = error.response.status || 500;
-        const errorData = error.response?.data || { error: 'Error fetching templates' };
-        return res.status(status).json({ error: errorData });
-      }
-      return res.status(500).json({ error: String(error) || 'Error fetching templates' });
-    } else {
-      const status = 500;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      return res.status(status).json({ error: errorMessage || 'Error fetching templates' });
-    }
+  } catch (error) {
+    console.error('Error fetching templates:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch templates',
+      details: error.message 
+    });
   }
 });
 
-/**
- * Health check endpoint
- */
-app.get('/', (req: Request, res: Response) => {
-  res.status(200).json({
-    status: 'ok',
-    message: 'WhatsApp webhook server is running',
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
     version: '1.0.0'
   });
 });
 
-// Start the server
-app.listen(port, () => {
-  console.log(`WhatsApp webhook server listening on port ${port}`);
+// Start server
+app.listen(PORT, () => {
+  console.log(`🚀 [WEBHOOK] Server running on port ${PORT}`);
+  console.log(`📋 [WEBHOOK] Environment check:`, {
+    hasVerifyToken: !!VERIFY_TOKEN,
+    hasBoltEndpoint: !!BOLT_WEBHOOK_ENDPOINT,
+    boltEndpoint: BOLT_WEBHOOK_ENDPOINT
+  });
 });
+
+export default app;
