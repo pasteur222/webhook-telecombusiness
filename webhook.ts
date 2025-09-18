@@ -1,6 +1,6 @@
 import express from 'express';
 import bodyParser from 'body-parser';
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 import dotenv from 'dotenv';
 
 // Load environment variables
@@ -16,6 +16,42 @@ app.use(bodyParser.json());
 
 // Standard fallback message for when Edge Function forwarding fails
 const FALLBACK_MESSAGE = "Thank you for your message regarding customer service, your request has been received and will be processed by our team, we will get back to you shortly.";
+
+// Type definitions for better error handling
+interface WhatsAppMessage {
+  id: string;
+  from: string;
+  timestamp: string;
+  text?: {
+    body: string;
+  };
+  type: string;
+}
+
+interface WhatsAppStatus {
+  id: string;
+  status: string;
+  timestamp: string;
+  recipient_id: string;
+}
+
+interface EdgeFunctionPayload {
+  phoneNumber: string;
+  webUserId?: string;
+  sessionId?: string;
+  source: "whatsapp";
+  text: string;
+  chatbotType: "client";
+  userAgent?: string;
+  timestamp: string;
+}
+
+interface StatusUpdatePayload {
+  messageId: string;
+  status: string;
+  timestamp: string;
+  recipientId: string;
+}
 
 // Webhook verification endpoint
 app.get('/webhook', (req, res) => {
@@ -45,21 +81,36 @@ app.post('/webhook', async (req, res) => {
     // Handle status updates (delivery receipts, read receipts, etc.)
     if (body.entry?.[0]?.changes?.[0]?.value?.statuses) {
       console.log('📊 [WEBHOOK] Received status update');
-      const statuses = body.entry[0].changes[0].value.statuses;
+      const statuses: WhatsAppStatus[] = body.entry[0].changes[0].value.statuses;
       
       // Forward status updates to Edge Function status handler
       try {
         for (const status of statuses) {
-          await axios.post(`${BOLT_WEBHOOK_ENDPOINT}/functions/v1/status-handler`, {
+          const statusPayload: StatusUpdatePayload = {
             messageId: status.id,
             status: status.status,
             timestamp: status.timestamp,
             recipientId: status.recipient_id
+          };
+
+          await axios.post(`${BOLT_WEBHOOK_ENDPOINT}/functions/v1/status-handler`, statusPayload, {
+            timeout: 10000,
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${process.env.SUPABASE_ANON_KEY || ''}`
+            }
           });
         }
         console.log('✅ [WEBHOOK] Status updates forwarded successfully');
       } catch (statusError) {
-        console.error('❌ [WEBHOOK] Error forwarding status updates:', statusError.message);
+        // ✅ FIX: Proper error type narrowing for TS18046
+        const errorMessage = statusError instanceof Error 
+          ? statusError.message 
+          : statusError instanceof AxiosError 
+            ? statusError.response?.data?.message || statusError.message
+            : 'Unknown status forwarding error';
+        
+        console.error('❌ [WEBHOOK] Error forwarding status updates:', errorMessage);
       }
       
       res.sendStatus(200);
@@ -68,7 +119,7 @@ app.post('/webhook', async (req, res) => {
 
     // Handle incoming messages
     if (body.entry?.[0]?.changes?.[0]?.value?.messages) {
-      const messages = body.entry[0].changes[0].value.messages;
+      const messages: WhatsAppMessage[] = body.entry[0].changes[0].value.messages;
       const contacts = body.entry[0].changes[0].value.contacts || [];
       
       for (const message of messages) {
@@ -84,13 +135,15 @@ app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
 
   } catch (error) {
-    console.error('❌ [WEBHOOK] Error processing webhook:', error);
+    // ✅ FIX: Proper error type narrowing for TS18046
+    const errorMessage = error instanceof Error ? error.message : 'Unknown webhook processing error';
+    console.error('❌ [WEBHOOK] Error processing webhook:', errorMessage);
     res.sendStatus(500);
   }
 });
 
 // Process individual incoming message
-async function processIncomingMessage(message: any, contacts: any[]) {
+async function processIncomingMessage(message: WhatsAppMessage, contacts: any[]): Promise<void> {
   try {
     // Extract message details
     const phoneNumber = message.from;
@@ -111,33 +164,24 @@ async function processIncomingMessage(message: any, contacts: any[]) {
       textLength: messageText.length
     });
 
-    // Determine chatbot type based on message content
-    const chatbotType = determineChatbotType(messageText);
-    
-    // Prepare payload for Edge Function with REQUIRED source field
-    const edgeFunctionPayload = {
+    // ✅ FIX: Always use correct payload structure with required fields
+    const edgeFunctionPayload: EdgeFunctionPayload = {
       phoneNumber: phoneNumber,
-      webUserId: undefined, // Not applicable for WhatsApp messages
-      sessionId: undefined, // Not applicable for WhatsApp messages  
-      source: "whatsapp",  // ✅ CRITICAL: Always set source as whatsapp for WhatsApp messages
+      webUserId: undefined,
+      sessionId: undefined,
+      source: "whatsapp",  // ✅ CRITICAL: Always whatsapp for WhatsApp messages
       text: messageText,
-      chatbotType: "client", // ✅ FIXED: Use "client" instead of "education"
-      userAgent: undefined, // Not applicable for WhatsApp messages
+      chatbotType: "client", // ✅ FIXED: Use "client" for customer service
+      userAgent: undefined,
       timestamp: timestamp
     };
-
-    // Validate that source field is present before forwarding
-    if (!edgeFunctionPayload.source) {
-      console.error('❌ [WEBHOOK] CRITICAL: Source field missing, this should never happen');
-      edgeFunctionPayload.source = "whatsapp";
-    }
 
     // Log the final payload being sent to Edge Function
     console.log('📤 [WEBHOOK] Forwarding to Edge Function with payload:', {
       phoneNumber: edgeFunctionPayload.phoneNumber,
       text: `${edgeFunctionPayload.text.substring(0, 50)}...`,
       chatbotType: edgeFunctionPayload.chatbotType,
-      source: edgeFunctionPayload.source,  // ✅ Confirm source is included
+      source: edgeFunctionPayload.source,
       textLength: edgeFunctionPayload.text.length,
       timestamp: edgeFunctionPayload.timestamp
     });
@@ -173,21 +217,30 @@ async function processIncomingMessage(message: any, contacts: any[]) {
       }
 
     } catch (forwardError) {
-      console.error('❌ [WEBHOOK] Failed to forward to Edge Function:', {
-        error: forwardError.message,
+      // ✅ FIX: Proper error type narrowing for TS18046
+      let errorDetails: {
+        message: string;
+        phoneNumber: string;
+        messageId: string;
+        status?: number;
+        statusText?: string;
+        responseData?: any;
+      } = {
+        message: 'Unknown forwarding error',
         phoneNumber: phoneNumber,
-        messageId: messageId,
-        payload: edgeFunctionPayload
-      });
-      
-      // Log Edge Function response details if available
-      if (forwardError.response) {
-        console.error('❌ [WEBHOOK] Edge Function response details:', {
-          status: forwardError.response.status,
-          statusText: forwardError.response.statusText,
-          data: forwardError.response.data
-        });
+        messageId: messageId
+      };
+
+      if (forwardError instanceof AxiosError) {
+        errorDetails.message = forwardError.message;
+        errorDetails.status = forwardError.response?.status;
+        errorDetails.statusText = forwardError.response?.statusText;
+        errorDetails.responseData = forwardError.response?.data;
+      } else if (forwardError instanceof Error) {
+        errorDetails.message = forwardError.message;
       }
+
+      console.error('❌ [WEBHOOK] Failed to forward to Edge Function:', errorDetails);
       
       edgeFunctionSuccess = false;
     }
@@ -199,33 +252,24 @@ async function processIncomingMessage(message: any, contacts: any[]) {
     }
 
   } catch (error) {
-    console.error('❌ [WEBHOOK] Error processing individual message:', error);
+    // ✅ FIX: Proper error type narrowing for TS18046
+    const errorMessage = error instanceof Error ? error.message : 'Unknown message processing error';
+    console.error('❌ [WEBHOOK] Error processing individual message:', errorMessage);
     
     // Send fallback message even if processing fails
     try {
       await sendFallbackMessage(message.from, message.id);
     } catch (fallbackError) {
-      console.error('❌ [WEBHOOK] Failed to send fallback message:', fallbackError);
+      const fallbackErrorMessage = fallbackError instanceof Error 
+        ? fallbackError.message 
+        : 'Unknown fallback error';
+      console.error('❌ [WEBHOOK] Failed to send fallback message:', fallbackErrorMessage);
     }
   }
 }
 
-// Determine chatbot type based on message content
-function determineChatbotType(messageText: string): string {
-  const lowerText = messageText.toLowerCase();
-  
-  // Quiz keywords
-  const quizKeywords = ['quiz', 'game', 'test', 'play', 'challenge', 'jeu', 'défi'];
-  if (quizKeywords.some(keyword => lowerText.includes(keyword))) {
-    return 'quiz';
-  }
-  
-  // Default to customer service (client)
-  return 'client';
-}
-
 // Send fallback message when Edge Function fails
-async function sendFallbackMessage(phoneNumber: string, originalMessageId: string) {
+async function sendFallbackMessage(phoneNumber: string, originalMessageId: string): Promise<void> {
   try {
     console.log('📤 [WEBHOOK] Sending fallback message to:', phoneNumber);
     
@@ -244,7 +288,9 @@ async function sendFallbackMessage(phoneNumber: string, originalMessageId: strin
     console.log('✅ [WEBHOOK] Fallback message sent successfully');
     
   } catch (error) {
-    console.error('❌ [WEBHOOK] Error sending fallback message:', error);
+    // ✅ FIX: Proper error type narrowing for TS18046
+    const errorMessage = error instanceof Error ? error.message : 'Unknown fallback error';
+    console.error('❌ [WEBHOOK] Error sending fallback message:', errorMessage);
   }
 }
 
@@ -260,9 +306,12 @@ app.get('/templates/:businessAccountId', async (req, res) => {
     
     const accessToken = authHeader.substring(7);
     
+    // ✅ FIX: Ensure businessAccountId is a string for TS2345
+    const accountId = String(businessAccountId);
+    
     // Fetch templates from Meta API
     const response = await axios.get(
-      `https://graph.facebook.com/v19.0/${businessAccountId}/message_templates`,
+      `https://graph.facebook.com/v19.0/${accountId}/message_templates`,
       {
         headers: {
           'Authorization': `Bearer ${accessToken}`
@@ -274,10 +323,21 @@ app.get('/templates/:businessAccountId', async (req, res) => {
     res.json(response.data);
     
   } catch (error) {
-    console.error('Error fetching templates:', error);
+    // ✅ FIX: Proper error type narrowing for TS18046
+    let errorMessage = 'Unknown template fetch error';
+    let errorDetails = '';
+
+    if (error instanceof AxiosError) {
+      errorMessage = error.message;
+      errorDetails = error.response?.data?.message || error.response?.statusText || '';
+    } else if (error instanceof Error) {
+      errorMessage = error.message;
+    }
+
+    console.error('Error fetching templates:', errorMessage);
     res.status(500).json({ 
       error: 'Failed to fetch templates',
-      details: error.message 
+      details: errorDetails
     });
   }
 });
