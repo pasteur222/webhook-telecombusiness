@@ -10,6 +10,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const BOLT_WEBHOOK_ENDPOINT = process.env.BOLT_WEBHOOK_ENDPOINT;
+const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+const META_PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID;
 
 // Middleware
 app.use(bodyParser.json());
@@ -96,7 +98,7 @@ app.post('/webhook', async (req, res) => {
           await axios.post(`${BOLT_WEBHOOK_ENDPOINT}/functions/v1/status-handler`, statusPayload, {
             timeout: 10000,
             headers: {
-              'Content-Type': 'application/json',
+                'Authorization': `Bearer ${process.env.SUPABASE_ANON_KEY}`
               'Authorization': `Bearer ${process.env.SUPABASE_ANON_KEY || ''}`
             }
           });
@@ -273,23 +275,46 @@ async function sendFallbackMessage(phoneNumber: string, originalMessageId: strin
   try {
     console.log('📤 [WEBHOOK] Sending fallback message to:', phoneNumber);
     
-    // This would typically send via WhatsApp API
-    // For now, we'll log that the fallback message should be sent
-    console.log('💬 [WEBHOOK] Fallback message content:', FALLBACK_MESSAGE);
+    // Check if WhatsApp API credentials are configured
+    if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) {
+      console.error('❌ [WEBHOOK] WhatsApp API credentials not configured for fallback');
+      console.log('💬 [WEBHOOK] Fallback message content (not sent):', FALLBACK_MESSAGE);
+      return;
+    }
     
-    // In a real implementation, you would:
-    // 1. Get WhatsApp API credentials
-    // 2. Send the fallback message via WhatsApp API
-    // 3. Log the result
+    // Send fallback message via WhatsApp API
+    const whatsappResponse = await axios.post(
+      `https://graph.facebook.com/v18.0/${META_PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: phoneNumber,
+        type: 'text',
+        text: { body: FALLBACK_MESSAGE }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${META_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 15000
+      }
+    );
     
-    // Placeholder for actual WhatsApp API call
-    // const whatsappResponse = await sendWhatsAppMessage(phoneNumber, FALLBACK_MESSAGE);
-    
-    console.log('✅ [WEBHOOK] Fallback message sent successfully');
+    if (whatsappResponse.status === 200) {
+      const messageId = whatsappResponse.data.messages?.[0]?.id;
+      console.log('✅ [WEBHOOK] Fallback message sent successfully:', { phoneNumber, messageId });
+    } else {
+      throw new Error(`WhatsApp API returned status ${whatsappResponse.status}`);
+    }
     
   } catch (error) {
     // ✅ FIX: Proper error type narrowing for TS18046
-    const errorMessage = error instanceof Error ? error.message : 'Unknown fallback error';
+    const errorMessage = error instanceof Error 
+      ? error.message 
+      : error instanceof AxiosError 
+        ? error.response?.data?.error?.message || error.message
+        : 'Unknown fallback error';
     console.error('❌ [WEBHOOK] Error sending fallback message:', errorMessage);
   }
 }
