@@ -98,7 +98,7 @@ app.post('/webhook', async (req, res) => {
           await axios.post(`${BOLT_WEBHOOK_ENDPOINT}/functions/v1/status-handler`, statusPayload, {
             timeout: 10000,
             headers: {
-                'Authorization': `Bearer ${process.env.SUPABASE_ANON_KEY}`
+                
               'Authorization': `Bearer ${process.env.SUPABASE_ANON_KEY || ''}`
             }
           });
