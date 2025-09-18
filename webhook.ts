@@ -17,7 +17,7 @@ const META_PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID;
 app.use(bodyParser.json());
 
 // Standard fallback message for when Edge Function forwarding fails
-const FALLBACK_MESSAGE = "Thank you for your message regarding customer service, your request has been received and will be processed by our team, we will get back to you shortly.";
+const FALLBACK_MESSAGE = " Merci pour votre message concernant le service client. Votre demande a été reçue et sera traitée par notre équipe. Nous reviendrons vers vous sous peu.";
 
 // Type definitions for better error handling
 interface WhatsAppMessage {
