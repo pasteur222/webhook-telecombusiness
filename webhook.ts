@@ -190,7 +190,7 @@ async function processIncomingMessage(message: WhatsAppMessage, contacts: any[])
 
     // Forward to Edge Function with timeout and retry logic
     let edgeFunctionSuccess = false;
-    let edgeFunctionResponse = null;
+    let edgeFunctionResponse: any = null;
     
     try {
       const response = await axios.post(
@@ -209,6 +209,20 @@ async function processIncomingMessage(message: WhatsAppMessage, contacts: any[])
       
       if (response.status === 200 && edgeFunctionResponse?.success) {
         console.log('✅ [WEBHOOK] Edge Function processed message successfully');
+        
+        // ✅ NEW: Extract and send the bot's response to WhatsApp
+        if (edgeFunctionResponse.response && edgeFunctionResponse.response.trim()) {
+          console.log('📤 [WEBHOOK] Sending Edge Function response to WhatsApp:', {
+            phoneNumber: phoneNumber,
+            responseLength: edgeFunctionResponse.response.length,
+            messageId: messageId
+          });
+          
+          await sendBotResponseToWhatsApp(phoneNumber, edgeFunctionResponse.response, messageId);
+        } else {
+          console.warn('⚠️ [WEBHOOK] Edge Function succeeded but returned no response content');
+        }
+        
         edgeFunctionSuccess = true;
       } else {
         console.error('❌ [WEBHOOK] Edge Function returned error:', {
@@ -267,6 +281,85 @@ async function processIncomingMessage(message: WhatsAppMessage, contacts: any[])
         : 'Unknown fallback error';
       console.error('❌ [WEBHOOK] Failed to send fallback message:', fallbackErrorMessage);
     }
+  }
+}
+
+// ✅ NEW: Function to send bot response to WhatsApp
+async function sendBotResponseToWhatsApp(phoneNumber: string, botMessage: string, originalMessageId: string): Promise<void> {
+  try {
+    console.log('📤 [WEBHOOK] Sending bot response to WhatsApp:', {
+      phoneNumber,
+      messageLength: botMessage.length
+    });
+    
+    // Check if WhatsApp API credentials are configured
+    if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) {
+      console.error('❌ [WEBHOOK] WhatsApp API credentials not configured for bot response');
+      console.log('💬 [WEBHOOK] Bot response content (not sent):', botMessage.substring(0, 100) + '...');
+      return;
+    }
+    
+    // Validate and sanitize the bot message
+    let sanitizedMessage = botMessage.trim();
+    if (sanitizedMessage.length === 0) {
+      console.error('❌ [WEBHOOK] Bot message is empty after sanitization');
+      return;
+    }
+    
+    // Ensure message doesn't exceed WhatsApp's 4096 character limit
+    if (sanitizedMessage.length > 4096) {
+      console.warn('⚠️ [WEBHOOK] Bot message too long, truncating');
+      sanitizedMessage = sanitizedMessage.substring(0, 4093) + '...';
+    }
+    
+    // Send bot response via WhatsApp API
+    const whatsappResponse = await axios.post(
+      `https://graph.facebook.com/v18.0/${META_PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: phoneNumber,
+        type: 'text',
+        text: { body: sanitizedMessage }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${META_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 15000
+      }
+    );
+    
+    if (whatsappResponse.status === 200) {
+      const responseMessageId = whatsappResponse.data.messages?.[0]?.id;
+      console.log('✅ [WEBHOOK] Bot response sent successfully to WhatsApp:', {
+        phoneNumber,
+        originalMessageId,
+        responseMessageId,
+        messageLength: sanitizedMessage.length
+      });
+    } else {
+      throw new Error(`WhatsApp API returned status ${whatsappResponse.status}`);
+    }
+    
+  } catch (error) {
+    // ✅ FIX: Proper error type narrowing for TS18046
+    const errorMessage = error instanceof Error 
+      ? error.message 
+      : error instanceof AxiosError 
+        ? error.response?.data?.error?.message || error.message
+        : 'Unknown bot response error';
+    
+    console.error('❌ [WEBHOOK] Error sending bot response to WhatsApp:', {
+      phoneNumber,
+      originalMessageId,
+      error: errorMessage,
+      botMessageLength: botMessage.length
+    });
+    
+    // Don't throw here - we don't want to trigger fallback message
+    // The Edge Function already processed successfully, just the WhatsApp send failed
   }
 }
 
