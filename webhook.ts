@@ -8,18 +8,17 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// ✅ MINIMAL AUTONOMOUS WEBHOOK - Only static environment variables needed
+// All user-specific credentials (access_token, phone_number_id, Groq key) are retrieved dynamically by Edge Function
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const BOLT_WEBHOOK_ENDPOINT = process.env.BOLT_WEBHOOK_ENDPOINT;
-const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
-const META_PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
 // Middleware
 app.use(bodyParser.json());
 
-// Standard fallback message for when Edge Function forwarding fails
-const FALLBACK_MESSAGE = " Merci pour votre message concernant le service client. Votre demande a été reçue et sera traitée par notre équipe. Nous reviendrons vers vous sous peu.";
-
-// Type definitions for better error handling
+// Type definitions
 interface WhatsAppMessage {
   id: string;
   from: string;
@@ -39,6 +38,7 @@ interface WhatsAppStatus {
 
 interface EdgeFunctionPayload {
   phoneNumber: string;
+  phoneNumberId?: string; // WhatsApp Business Phone Number ID (for user identification)
   webUserId?: string;
   sessionId?: string;
   source: "whatsapp";
@@ -84,7 +84,7 @@ app.post('/webhook', async (req, res) => {
     if (body.entry?.[0]?.changes?.[0]?.value?.statuses) {
       console.log('📊 [WEBHOOK] Received status update');
       const statuses: WhatsAppStatus[] = body.entry[0].changes[0].value.statuses;
-      
+
       // Forward status updates to Edge Function status handler
       try {
         for (const status of statuses) {
@@ -98,23 +98,22 @@ app.post('/webhook', async (req, res) => {
           await axios.post(`${BOLT_WEBHOOK_ENDPOINT}/functions/v1/status-handler`, statusPayload, {
             timeout: 10000,
             headers: {
-                
-              'Authorization': `Bearer ${process.env.SUPABASE_ANON_KEY || ''}`
+              'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+              'Content-Type': 'application/json'
             }
           });
         }
         console.log('✅ [WEBHOOK] Status updates forwarded successfully');
       } catch (statusError) {
-        // ✅ FIX: Proper error type narrowing for TS18046
-        const errorMessage = statusError instanceof Error 
-          ? statusError.message 
-          : statusError instanceof AxiosError 
+        const errorMessage = statusError instanceof Error
+          ? statusError.message
+          : statusError instanceof AxiosError
             ? statusError.response?.data?.message || statusError.message
             : 'Unknown status forwarding error';
-        
+
         console.error('❌ [WEBHOOK] Error forwarding status updates:', errorMessage);
       }
-      
+
       res.sendStatus(200);
       return;
     }
@@ -123,11 +122,22 @@ app.post('/webhook', async (req, res) => {
     if (body.entry?.[0]?.changes?.[0]?.value?.messages) {
       const messages: WhatsAppMessage[] = body.entry[0].changes[0].value.messages;
       const contacts = body.entry[0].changes[0].value.contacts || [];
-      
-      for (const message of messages) {
-        await processIncomingMessage(message, contacts);
+
+      // ✅ CRITICAL: Extract phone_number_id from metadata (identifies which business account received message)
+      const phoneNumberId = body.entry[0].changes[0].value.metadata?.phone_number_id;
+
+      if (!phoneNumberId) {
+        console.error('❌ [WEBHOOK] CRITICAL: phone_number_id not found in webhook metadata');
+        res.sendStatus(200); // Still acknowledge to prevent retries
+        return;
       }
-      
+
+      console.log('📞 [WEBHOOK] WhatsApp Business Phone Number ID:', phoneNumberId);
+
+      for (const message of messages) {
+        await processIncomingMessage(message, contacts, phoneNumberId);
+      }
+
       res.sendStatus(200);
       return;
     }
@@ -137,61 +147,63 @@ app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
 
   } catch (error) {
-    // ✅ FIX: Proper error type narrowing for TS18046
     const errorMessage = error instanceof Error ? error.message : 'Unknown webhook processing error';
     console.error('❌ [WEBHOOK] Error processing webhook:', errorMessage);
     res.sendStatus(500);
   }
 });
 
-// Process individual incoming message
-async function processIncomingMessage(message: WhatsAppMessage, contacts: any[]): Promise<void> {
+// Process individual incoming message - MINIMAL FORWARDER
+async function processIncomingMessage(message: WhatsAppMessage, contacts: any[], phoneNumberId: string): Promise<void> {
   try {
     // Extract message details
     const phoneNumber = message.from;
     const messageId = message.id;
     const timestamp = message.timestamp;
-    
-    // Only process text messages for now
+
+    // Only process text messages
     if (!message.text?.body) {
       console.log('ℹ️ [WEBHOOK] Skipping non-text message:', messageId);
       return;
     }
 
     const messageText = message.text.body;
-    
+
     console.log('📨 [WEBHOOK] Processing incoming message:', {
       from: phoneNumber,
       messageId: messageId,
+      phoneNumberId: phoneNumberId,
       textLength: messageText.length
     });
 
-    // ✅ FIX: Always use correct payload structure with required fields
+    // Create payload for Edge Function
     const edgeFunctionPayload: EdgeFunctionPayload = {
       phoneNumber: phoneNumber,
+      phoneNumberId: phoneNumberId, // ✅ CRITICAL: For user identification in Edge Function
       webUserId: undefined,
       sessionId: undefined,
-      source: "whatsapp",  // ✅ CRITICAL: Always whatsapp for WhatsApp messages
+      source: "whatsapp",
       text: messageText,
-      chatbotType: "client", // ✅ FIXED: Use "client" for customer service
+      chatbotType: "client",
       userAgent: undefined,
       timestamp: timestamp
     };
 
-    // Log the final payload being sent to Edge Function
-    console.log('📤 [WEBHOOK] Forwarding to Edge Function with payload:', {
+    // Log the payload being forwarded
+    console.log('📤 [WEBHOOK] Forwarding to Edge Function:', {
       phoneNumber: edgeFunctionPayload.phoneNumber,
+      phoneNumberId: edgeFunctionPayload.phoneNumberId,
       text: `${edgeFunctionPayload.text.substring(0, 50)}...`,
-      chatbotType: edgeFunctionPayload.chatbotType,
-      source: edgeFunctionPayload.source,
-      textLength: edgeFunctionPayload.text.length,
-      timestamp: edgeFunctionPayload.timestamp
+      textLength: edgeFunctionPayload.text.length
     });
 
-    // Forward to Edge Function with timeout and retry logic
-    let edgeFunctionSuccess = false;
-    let edgeFunctionResponse: any = null;
-    
+    // ✅ AUTONOMOUS: Forward to Edge Function - it handles EVERYTHING
+    // - User identification via phone_number_id
+    // - Retrieve user's Groq API key
+    // - Retrieve user's WhatsApp credentials
+    // - Generate AI response
+    // - Send response to WhatsApp
+    // - Log to database
     try {
       const response = await axios.post(
         `${BOLT_WEBHOOK_ENDPOINT}/functions/v1/api-chatbot`,
@@ -200,51 +212,34 @@ async function processIncomingMessage(message: WhatsAppMessage, contacts: any[])
           timeout: 30000, // 30 second timeout
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${process.env.SUPABASE_ANON_KEY || ''}`
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
           }
         }
       );
 
-      edgeFunctionResponse = response.data;
-      
-      if (response.status === 200 && edgeFunctionResponse?.success) {
-        console.log('✅ [WEBHOOK] Edge Function processed message successfully');
-        
-        // ✅ NEW: Extract and send the bot's response to WhatsApp
-        if (edgeFunctionResponse.response && edgeFunctionResponse.response.trim()) {
-          console.log('📤 [WEBHOOK] Sending Edge Function response to WhatsApp:', {
-            phoneNumber: phoneNumber,
-            responseLength: edgeFunctionResponse.response.length,
-            messageId: messageId
-          });
-          
-          await sendBotResponseToWhatsApp(phoneNumber, edgeFunctionResponse.response, messageId);
-        } else {
-          console.warn('⚠️ [WEBHOOK] Edge Function succeeded but returned no response content');
-        }
-        
-        edgeFunctionSuccess = true;
+      if (response.status === 200 && response.data?.success) {
+        console.log('✅ [WEBHOOK] Edge Function processed and sent message successfully');
       } else {
         console.error('❌ [WEBHOOK] Edge Function returned error:', {
           status: response.status,
-          responseData: edgeFunctionResponse
+          responseData: response.data
         });
-        throw new Error(`Edge Function error: ${JSON.stringify(edgeFunctionResponse)}`);
       }
-
     } catch (forwardError) {
-      // ✅ FIX: Proper error type narrowing for TS18046
+      // Log detailed error information
       let errorDetails: {
         message: string;
         phoneNumber: string;
         messageId: string;
+        phoneNumberId: string;
         status?: number;
         statusText?: string;
         responseData?: any;
       } = {
         message: 'Unknown forwarding error',
         phoneNumber: phoneNumber,
-        messageId: messageId
+        messageId: messageId,
+        phoneNumberId: phoneNumberId
       };
 
       if (forwardError instanceof AxiosError) {
@@ -257,158 +252,14 @@ async function processIncomingMessage(message: WhatsAppMessage, contacts: any[])
       }
 
       console.error('❌ [WEBHOOK] Failed to forward to Edge Function:', errorDetails);
-      
-      edgeFunctionSuccess = false;
-    }
 
-    // If Edge Function forwarding failed, send fallback message directly
-    if (!edgeFunctionSuccess) {
-      console.log('🔄 [WEBHOOK] Edge Function failed, sending fallback message');
-      await sendFallbackMessage(phoneNumber, messageId);
+      // ✅ AUTONOMOUS: Edge Function handles errors and fallback messages
+      // Webhook doesn't need to send fallback - Edge Function owns the WhatsApp credentials
     }
 
   } catch (error) {
-    // ✅ FIX: Proper error type narrowing for TS18046
     const errorMessage = error instanceof Error ? error.message : 'Unknown message processing error';
     console.error('❌ [WEBHOOK] Error processing individual message:', errorMessage);
-    
-    // Send fallback message even if processing fails
-    try {
-      await sendFallbackMessage(message.from, message.id);
-    } catch (fallbackError) {
-      const fallbackErrorMessage = fallbackError instanceof Error 
-        ? fallbackError.message 
-        : 'Unknown fallback error';
-      console.error('❌ [WEBHOOK] Failed to send fallback message:', fallbackErrorMessage);
-    }
-  }
-}
-
-// ✅ NEW: Function to send bot response to WhatsApp
-async function sendBotResponseToWhatsApp(phoneNumber: string, botMessage: string, originalMessageId: string): Promise<void> {
-  try {
-    console.log('📤 [WEBHOOK] Sending bot response to WhatsApp:', {
-      phoneNumber,
-      messageLength: botMessage.length
-    });
-    
-    // Check if WhatsApp API credentials are configured
-    if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) {
-      console.error('❌ [WEBHOOK] WhatsApp API credentials not configured for bot response');
-      console.log('💬 [WEBHOOK] Bot response content (not sent):', botMessage.substring(0, 100) + '...');
-      return;
-    }
-    
-    // Validate and sanitize the bot message
-    let sanitizedMessage = botMessage.trim();
-    if (sanitizedMessage.length === 0) {
-      console.error('❌ [WEBHOOK] Bot message is empty after sanitization');
-      return;
-    }
-    
-    // Ensure message doesn't exceed WhatsApp's 4096 character limit
-    if (sanitizedMessage.length > 4096) {
-      console.warn('⚠️ [WEBHOOK] Bot message too long, truncating');
-      sanitizedMessage = sanitizedMessage.substring(0, 4093) + '...';
-    }
-    
-    // Send bot response via WhatsApp API
-    const whatsappResponse = await axios.post(
-      `https://graph.facebook.com/v18.0/${META_PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: phoneNumber,
-        type: 'text',
-        text: { body: sanitizedMessage }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${META_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 15000
-      }
-    );
-    
-    if (whatsappResponse.status === 200) {
-      const responseMessageId = whatsappResponse.data.messages?.[0]?.id;
-      console.log('✅ [WEBHOOK] Bot response sent successfully to WhatsApp:', {
-        phoneNumber,
-        originalMessageId,
-        responseMessageId,
-        messageLength: sanitizedMessage.length
-      });
-    } else {
-      throw new Error(`WhatsApp API returned status ${whatsappResponse.status}`);
-    }
-    
-  } catch (error) {
-    // ✅ FIX: Proper error type narrowing for TS18046
-    const errorMessage = error instanceof Error 
-      ? error.message 
-      : error instanceof AxiosError 
-        ? error.response?.data?.error?.message || error.message
-        : 'Unknown bot response error';
-    
-    console.error('❌ [WEBHOOK] Error sending bot response to WhatsApp:', {
-      phoneNumber,
-      originalMessageId,
-      error: errorMessage,
-      botMessageLength: botMessage.length
-    });
-    
-    // Don't throw here - we don't want to trigger fallback message
-    // The Edge Function already processed successfully, just the WhatsApp send failed
-  }
-}
-
-// Send fallback message when Edge Function fails
-async function sendFallbackMessage(phoneNumber: string, originalMessageId: string): Promise<void> {
-  try {
-    console.log('📤 [WEBHOOK] Sending fallback message to:', phoneNumber);
-    
-    // Check if WhatsApp API credentials are configured
-    if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) {
-      console.error('❌ [WEBHOOK] WhatsApp API credentials not configured for fallback');
-      console.log('💬 [WEBHOOK] Fallback message content (not sent):', FALLBACK_MESSAGE);
-      return;
-    }
-    
-    // Send fallback message via WhatsApp API
-    const whatsappResponse = await axios.post(
-      `https://graph.facebook.com/v18.0/${META_PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: phoneNumber,
-        type: 'text',
-        text: { body: FALLBACK_MESSAGE }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${META_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 15000
-      }
-    );
-    
-    if (whatsappResponse.status === 200) {
-      const messageId = whatsappResponse.data.messages?.[0]?.id;
-      console.log('✅ [WEBHOOK] Fallback message sent successfully:', { phoneNumber, messageId });
-    } else {
-      throw new Error(`WhatsApp API returned status ${whatsappResponse.status}`);
-    }
-    
-  } catch (error) {
-    // ✅ FIX: Proper error type narrowing for TS18046
-    const errorMessage = error instanceof Error 
-      ? error.message 
-      : error instanceof AxiosError 
-        ? error.response?.data?.error?.message || error.message
-        : 'Unknown fallback error';
-    console.error('❌ [WEBHOOK] Error sending fallback message:', errorMessage);
   }
 }
 
@@ -417,16 +268,14 @@ app.get('/templates/:businessAccountId', async (req, res) => {
   try {
     const { businessAccountId } = req.params;
     const authHeader = req.headers.authorization;
-    
+
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({ error: 'Missing or invalid authorization header' });
     }
-    
+
     const accessToken = authHeader.substring(7);
-    
-    // ✅ FIX: Ensure businessAccountId is a string for TS2345
     const accountId = String(businessAccountId);
-    
+
     // Fetch templates from Meta API
     const response = await axios.get(
       `https://graph.facebook.com/v19.0/${accountId}/message_templates`,
@@ -437,11 +286,10 @@ app.get('/templates/:businessAccountId', async (req, res) => {
         timeout: 10000
       }
     );
-    
+
     res.json(response.data);
-    
+
   } catch (error) {
-    // ✅ FIX: Proper error type narrowing for TS18046
     let errorMessage = 'Unknown template fetch error';
     let errorDetails = '';
 
@@ -453,7 +301,7 @@ app.get('/templates/:businessAccountId', async (req, res) => {
     }
 
     console.error('Error fetching templates:', errorMessage);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to fetch templates',
       details: errorDetails
     });
@@ -462,21 +310,28 @@ app.get('/templates/:businessAccountId', async (req, res) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
+  res.json({
+    status: 'healthy',
     timestamp: new Date().toISOString(),
-    version: '1.0.0'
+    version: '2.0.0-autonomous',
+    config: {
+      hasVerifyToken: !!VERIFY_TOKEN,
+      hasBoltEndpoint: !!BOLT_WEBHOOK_ENDPOINT,
+      hasSupabaseKey: !!SUPABASE_ANON_KEY
+    }
   });
 });
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 [WEBHOOK] Server running on port ${PORT}`);
-  console.log(`📋 [WEBHOOK] Environment check:`, {
+  console.log(`🚀 [WEBHOOK] Autonomous webhook server running on port ${PORT}`);
+  console.log(`📋 [WEBHOOK] Configuration:`, {
     hasVerifyToken: !!VERIFY_TOKEN,
     hasBoltEndpoint: !!BOLT_WEBHOOK_ENDPOINT,
+    hasSupabaseKey: !!SUPABASE_ANON_KEY,
     boltEndpoint: BOLT_WEBHOOK_ENDPOINT
   });
+  console.log('✅ [WEBHOOK] Running in AUTONOMOUS mode - all user credentials retrieved dynamically by Edge Function');
 });
 
 export default app;
