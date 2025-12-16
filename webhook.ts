@@ -37,7 +37,7 @@ interface WhatsAppStatus {
 }
 
 interface EdgeFunctionPayload {
-  phoneNumber: string;
+  from: string; // Changed from phoneNumber to match webhook-handler expectation
   phoneNumberId?: string; // WhatsApp Business Phone Number ID (for user identification)
   webUserId?: string;
   sessionId?: string;
@@ -178,7 +178,7 @@ async function processIncomingMessage(message: WhatsAppMessage, contacts: any[],
 
     // Create payload for Edge Function
     const edgeFunctionPayload: EdgeFunctionPayload = {
-      phoneNumber: phoneNumber,
+      from: phoneNumber, // ✅ Changed to 'from' to match webhook-handler expectation
       phoneNumberId: phoneNumberId, // ✅ CRITICAL: For user identification in Edge Function
       webUserId: undefined,
       sessionId: undefined,
@@ -191,7 +191,7 @@ async function processIncomingMessage(message: WhatsAppMessage, contacts: any[],
 
     // Log the payload being forwarded
     console.log('📤 [WEBHOOK] Forwarding to Edge Function:', {
-      phoneNumber: edgeFunctionPayload.phoneNumber,
+      from: edgeFunctionPayload.from,
       phoneNumberId: edgeFunctionPayload.phoneNumberId,
       text: `${edgeFunctionPayload.text.substring(0, 50)}...`,
       textLength: edgeFunctionPayload.text.length

@@ -60,7 +60,8 @@ async function testWebhook() {
     // Test 4: Direct Edge Function test
     console.log('\n4. Testing Edge Function directly...');
     const edgeResponse = await axios.post(EDGE_FUNCTION_URL, {
-      phoneNumber: '+221123456789',
+      from: '+221123456789',
+      phoneNumberId: 'test_phone_number_id',
       source: 'whatsapp',
       text: 'Test direct edge function call',
       chatbotType: 'client',
