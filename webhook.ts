@@ -201,12 +201,13 @@ async function processIncomingMessage(message: WhatsAppMessage, contacts: any[],
     // - User identification via phone_number_id
     // - Retrieve user's Groq API key
     // - Retrieve user's WhatsApp credentials
-    // - Generate AI response
+    // - Detect quiz sessions or keywords (routes to quiz or customer service)
+    // - Generate appropriate response (quiz or AI customer service)
     // - Send response to WhatsApp
     // - Log to database
     try {
       const response = await axios.post(
-        `${BOLT_WEBHOOK_ENDPOINT}/functions/v1/api-chatbot`,
+        `${BOLT_WEBHOOK_ENDPOINT}/functions/v1/webhook-handler`,
         edgeFunctionPayload,
         {
           timeout: 30000, // 30 second timeout
