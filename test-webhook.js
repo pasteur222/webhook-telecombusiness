@@ -2,7 +2,7 @@
 const axios = require('axios');
 
 const WEBHOOK_URL = 'http://localhost:3000/webhook';
-const EDGE_FUNCTION_URL = process.env.BOLT_WEBHOOK_ENDPOINT + '/functions/v1/api-chatbot';
+const EDGE_FUNCTION_URL = process.env.BOLT_WEBHOOK_ENDPOINT + '/functions/v1/webhook-handler';
 
 // Test data
 const testMessage = {
